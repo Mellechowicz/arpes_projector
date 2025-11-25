@@ -1,38 +1,14 @@
 """
 This file contains the SurfaceBZAnalyzer class.
-It parses crystal structures, cleaves slabs, computes reciprocal lattices,
-projects three-dimensional Brillouin zones to two-dimensional planes, identifies k-paths,
-clusters projected points, and generates visualizations.
-
-Inputs:
- - filepath: Path to a structure file (CONTCAR, POSCAR, vasprun.xml, or vaspout.h5).
- - miller_index: Three-integer tuple specifying the surface plane.
- - min_slab: Float specifying the minimum slab thickness in Angstroms.
- - min_vac: Float specifying the minimum vacuum thickness in Angstroms.
-
-Outputs:
- - A symmetrized slab structure.
- - Three-dimensional and two-dimensional reciprocal lattice matrices.
- - A dictionary containing projected k-points, labels, and clustering assignments.
- - Visual plots of the bulk and projected Brillouin zones.
-
-Approach and Modules:
- - Slab generation: pymatgen.core.surface.SlabGenerator.
- - High-symmetry path detection: pymatgen.symmetry.bandstructure.HighSymmKpath.
- - Wigner-Seitz cell calculation: Voronoi tessellation via scipy.spatial.Voronoi.
- - Vertex sorting: Convex hull boundary calculation via scipy.spatial.ConvexHull.
- - Density clustering: DBSCAN point grouping via sklearn.cluster.DBSCAN.
- - Spatial matching: Nearest neighbors mapping via sklearn.neighbors.NearestNeighbors.
- - Linear algebra: Vector projections via numpy.
- - Graphics: Plot rendering via matplotlib.pyplot and Poly3DCollection.
+It implements a mathematically rigorous projection of 3D bulk states onto 
+arbitrary 2D surface planes, visualizing the First Brillouin Zones and band foldings.
 """
-import os
+import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from scipy.spatial import Voronoi, ConvexHull
+from scipy.spatial import Voronoi
 from sklearn.cluster import DBSCAN
-from sklearn.neighbors import NearestNeighbors
 from pymatgen.io.vasp.outputs import Vasprun, Vaspout
 from pymatgen.core.surface import SlabGenerator
 from pymatgen.symmetry.bandstructure import HighSymmKpath
@@ -44,103 +20,182 @@ class SurfaceBZAnalyzer:
         self.bulk_structure = self._parse_structure()
 
     def _parse_structure(self):
-        """Parses vaspout.h5 (modern) or vasprun.xml (legacy)."""
         if self.filepath.endswith(".h5"):
-            parser = Vaspout(self.filepath)
-        else:
-            parser = Vasprun(self.filepath)
-        return parser.final_structure
+            return Vaspout(self.filepath).final_structure
+        return Vasprun(self.filepath).final_structure
+
+    def align_vector_to_z(self, v):
+        """Calculates the Cartesian rotation matrix to align a vector to the Z-axis."""
+        v = np.array(v, dtype=float)
+        v = v / np.linalg.norm(v)
+        z = np.array([0.0, 0.0, 1.0])
+
+        if np.allclose(v, z): return np.eye(3)
+        if np.allclose(v, -z): return -np.eye(3)
+
+        axis = np.cross(v, z)
+        axis = axis / np.linalg.norm(axis)
+        angle = np.arccos(np.clip(np.dot(v, z), -1.0, 1.0))
+
+        K = np.array([[0, -axis[2], axis[1]],
+                      [axis[2], 0, -axis[0]],
+                      [-axis[1], axis[0], 0]])
+        return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
 
     def generate_slab(self, miller_index, min_slab, min_vac):
-        """Generates a slab and derives 3D/2D reciprocal lattices."""
-        # Generate symmetrical slab
-        slabgen = SlabGenerator(self.bulk_structure, miller_index, min_slab, min_vac, center_slab=True)
-        # Extract the first unique, symmetrically balanced termination
-        self.slab = slabgen.get_slabs(symmetrize=True)
+        """Prepares the aligned Cartesian coordinate frames based on the Miller surface."""
+        self.miller_index = miller_index
 
-        # Physics convention (includes 2 * pi)
+        # 1. Base bulk reciprocal lattice
         self.bulk_recip = self.bulk_structure.lattice.reciprocal_lattice.matrix
-        self.slab_recip = self.slab.lattice.reciprocal_lattice.matrix
+        h, k, l = miller_index
 
-        # 2D in-plane projection of the slab reciprocal lattice
-        self.slab_recip_2d = self.slab_recip[:2, :2]
+        # 2. Find the reciprocal vector strictly normal to the (hkl) planes
+        n_vec = h * self.bulk_recip[0] + k * self.bulk_recip[1] + l * self.bulk_recip[2]
 
-    def get_wigner_seitz(self, recip_matrix, dim=3):
-        """Calculates Wigner-Seitz cell via Voronoi tessellation."""
-        # Generate local grid of reciprocal lattice nodes
-        grid_range = np.mgrid[-1:2, -1:2, -1:2] if dim == 3 else np.mgrid[-1:2, -1:2]
-        pts = np.tensordot(recip_matrix, grid_range, axes=2).reshape(dim, -1).T
+        # 3. Create a rotation matrix that stands the bulk BZ perfectly upright
+        self.R_align = self.align_vector_to_z(n_vec)
+        self.bulk_recip_aligned = self.bulk_recip @ self.R_align.T
 
+        # 4. Generate the 2D surface reciprocal lattice nodes (for Umklapp folding)
+        # By projecting a 7x7x7 grid of 3D nodes onto the XY plane and filtering unique states
+        translations = np.array(list(itertools.product(range(-3, 4), repeat=3)))
+        pts_3d = translations @ self.bulk_recip_aligned
+        pts_2d = pts_3d[:, :2]
+        self.surface_nodes_2d = np.unique(np.round(pts_2d, 5), axis=0)
+
+    def get_wigner_seitz_3d(self):
+        """Calculates the upright 3D Wigner-Seitz cell faces."""
+        translations = np.array(list(itertools.product([-1, 0, 1], repeat=3)))
+        pts = translations @ self.bulk_recip_aligned
         vor = Voronoi(pts)
-
-        # Find the region associated with the origin
         origin_idx = np.argmin(np.linalg.norm(pts, axis=1))
-        region_idx = vor.point_region[origin_idx]
-        region_vertices = vor.regions[region_idx]
 
-        return vor.vertices[region_vertices]
+        faces = []
+        for point_pair, ridge_verts in zip(vor.ridge_points, vor.ridge_vertices):
+            if origin_idx in point_pair and -1 not in ridge_verts:
+                faces.append(vor.vertices[ridge_verts])
+        return faces
+
+    def get_wigner_seitz_2d(self):
+        """Calculates the 2D Surface Wigner-Seitz cell boundary."""
+        vor = Voronoi(self.surface_nodes_2d)
+        origin_idx = np.argmin(np.linalg.norm(self.surface_nodes_2d, axis=1))
+
+        region_idx = vor.point_region[origin_idx]
+        region_vertices_indices = vor.regions[region_idx]
+        vertices = vor.vertices[region_vertices_indices]
+
+        # Sort counter-clockwise to form a closed polygon
+        center = np.mean(vertices, axis=0)
+        angles = np.arctan2(vertices[:, 1] - center[1], vertices[:, 0] - center[0])
+        return vertices[np.argsort(angles)]
+
+    def fold_to_first_bz(self, pt_2d):
+        """Mathematically translates an extended state into the First Brillouin Zone."""
+        distances = np.linalg.norm(self.surface_nodes_2d - pt_2d, axis=1)
+        closest_node = self.surface_nodes_2d[np.argmin(distances)]
+        return pt_2d - closest_node
 
     def correlate_zones(self):
-        """Finds high-symmetry paths and maps 3D bulk states to 2D slab plane."""
-        # 3D Bulk High-Symmetry Points
+        """Maps 3D paths to 2D projections and identifies band foldings."""
         bulk_kpath = HighSymmKpath(self.bulk_structure)
         bulk_kpts = bulk_kpath.kpath["kpoints"]
 
-        # Project 3D fractional coordinates to Cartesian, then drop the z-component
-        projected_kpts = []
-        labels = []
+        bulk_3d_kpts, projected_kpts, extended_kpts, labels = [], [], [], []
+
         for label, frac_coord in bulk_kpts.items():
-            cart_coord = np.dot(frac_coord, self.bulk_recip)
-            projected_kpts.append([cart_coord[0], cart_coord[1]])
+            # 1. Map to upright Cartesian frame
+            cart_3d = frac_coord @ self.bulk_recip_aligned
+
+            # 2. Perfect projection: simply drop the Z axis!
+            cart_2d_ext = cart_3d[:2] 
+
+            # 3. Fold into First Brillouin Zone
+            cart_2d_folded = self.fold_to_first_bz(cart_2d_ext)
+
+            bulk_3d_kpts.append(cart_3d)
+            extended_kpts.append(cart_2d_ext)
+            projected_kpts.append(cart_2d_folded)
             labels.append(label)
 
-        projected_kpts = np.array(projected_kpts)
-
-        # Cluster overlapped points using DBSCAN to identify band folding
-        clustering = DBSCAN(eps=1e-4, min_samples=1).fit(projected_kpts)
-
-        # 2D Surface High-Symmetry Points
-        slab_kpath = HighSymmKpath(self.slab)
-
-        # Map clusters using NearestNeighbors
-        nn = NearestNeighbors(n_neighbors=1).fit(projected_kpts)
-
         self.correlation_data = {
-                "projected_kpts": projected_kpts,
-                "labels": labels,
-                "clusters": clustering.labels_
+                "bulk_3d_kpts": np.array(bulk_3d_kpts),
+                "extended_kpts": np.array(extended_kpts),
+                "projected_kpts": np.array(projected_kpts),
+                "labels": labels
                 }
+
+        # Cluster overlapped points using DBSCAN on the folded coordinates
+        clustering = DBSCAN(eps=1e-4, min_samples=1).fit(self.correlation_data["projected_kpts"])
+        self.correlation_data["clusters"] = clustering.labels_
         return self.correlation_data
 
     def visualize(self):
-        """Renders the 3D and 2D Brillouin Zones."""
-        fig = plt.figure(figsize=(12, 5))
+        """Renders the Brillouin Zones with physically accurate vertical projection lines."""
+        fig = plt.figure(figsize=(14, 6))
 
-        # Plot 3D BZ
+        # ==========================================
+        # Subplot 1: 3D BZ
+        # ==========================================
         ax1 = fig.add_subplot(121, projection='3d')
-        bz_3d_verts = self.get_wigner_seitz(self.bulk_recip, dim=3)
-        hull = ConvexHull(bz_3d_verts)
-        for simplex in hull.simplices:
-            poly = Poly3DCollection([bz_3d_verts[simplex]], alpha=0.3, facecolor='cyan', edgecolor='k')
+        ax1.view_init(elev=20, azim=-45) # Set a good default viewing angle
+
+        # Plot 3D BZ Faces
+        faces_3d = self.get_wigner_seitz_3d()
+        for face in faces_3d:
+            poly = Poly3DCollection([face], alpha=0.15, facecolor='cyan', edgecolor='k', linewidth=1)
             ax1.add_collection3d(poly)
-        ax1.set_title("Bulk 3D Brillouin Zone")
 
-        # Plot 2D BZ with Projections
+        # Draw 2D Surface W-S cell embedded at kz=0
+        faces_2d = self.get_wigner_seitz_2d()
+        faces_2d_in_3d = np.column_stack((faces_2d, np.zeros(len(faces_2d))))
+        poly_2d = Poly3DCollection([faces_2d_in_3d], alpha=0.15, facecolor='red', edgecolor='red', linewidth=2)
+        ax1.add_collection3d(poly_2d)
+
+        bulk_3d = self.correlation_data["bulk_3d_kpts"]
+        proj_2d = self.correlation_data["projected_kpts"]
+        ext_2d = self.correlation_data["extended_kpts"]
+
+        # Plot Data and Projection Lines
+        for b_pt, p_pt, e_pt in zip(bulk_3d, proj_2d, ext_2d):
+            # 1. Straight vertical drop from bulk state to the extended zone (kz=0)
+            ax1.plot([b_pt[0], b_pt[0]], [b_pt[1], b_pt[1]], [b_pt[2], 0], 'k--', alpha=0.3, linewidth=1.2)
+
+            # 2. If the state folded, draw a red translation line back into the 1st BZ W-S cell
+            if np.linalg.norm(p_pt - e_pt) > 1e-4:
+                ax1.plot([b_pt[0], p_pt[0]], [b_pt[1], p_pt[1]], [0, 0], 'r:', alpha=0.7, linewidth=1.5)
+
+        # Scatter actual points
+        ax1.scatter(bulk_3d[:, 0], bulk_3d[:, 1], bulk_3d[:, 2], c='blue', s=30, zorder=10)
+        ax1.scatter(proj_2d[:, 0], proj_2d[:, 1], np.zeros(len(proj_2d)), c=self.correlation_data["clusters"], cmap='viridis', s=40, zorder=11)
+
+        # Text labels on 3D points
+        for b_pt, label in zip(bulk_3d, self.correlation_data["labels"]):
+            ax1.text(b_pt[0], b_pt[1], b_pt[2] + 0.02, f"${label}$", fontsize=10, zorder=12)
+
+        max_val = np.max(np.abs(np.vstack(faces_3d))) * 1.1
+        ax1.set_xlim([-max_val, max_val])
+        ax1.set_ylim([-max_val, max_val])
+        ax1.set_zlim([-max_val, max_val])
+        ax1.set_box_aspect((1, 1, 1))
+        ax1.set_title(f"Bulk 3D BZ & {self.miller_index} Projection")
+
+        # ==========================================
+        # Subplot 2: 2D Surface Brillouin Zone Flat
+        # ==========================================
         ax2 = fig.add_subplot(122)
-        bz_2d_verts = self.get_wigner_seitz(self.slab_recip_2d, dim=2)
-        hull_2d = ConvexHull(bz_2d_verts)
-        for simplex in hull_2d.simplices:
-            ax2.plot(bz_2d_verts[simplex, 0], bz_2d_verts[simplex, 1], 'k-')
 
-        # Scatter projected clusters
-        proj = self.correlation_data["projected_kpts"]
-        ax2.scatter(proj[:, 0], proj[:, 1], c=self.correlation_data["clusters"], cmap='viridis', s=50, zorder=5)
+        perim = np.vstack((faces_2d, faces_2d[0]))
+        ax2.plot(perim[:, 0], perim[:, 1], 'k-', linewidth=2)
+        ax2.scatter(proj_2d[:, 0], proj_2d[:, 1], c=self.correlation_data["clusters"], cmap='viridis', s=70, zorder=5)
 
-        for i, label in enumerate(self.correlation_data["labels"]):
-            ax2.text(proj[i, 0], proj[i, 1], f"${label}$", fontsize=12)
+        for p_pt, label in zip(proj_2d, self.correlation_data["labels"]):
+            ax2.text(p_pt[0] + 0.02, p_pt[1] + 0.02, f"${label}$", fontsize=12)
 
-        ax2.set_title("Projected 2D Surface Brillouin Zone")
+        ax2.set_title(f"Projected 2D Surface Brillouin Zone {self.miller_index}")
         ax2.set_aspect('equal')
+
         plt.tight_layout()
         plt.show()
 

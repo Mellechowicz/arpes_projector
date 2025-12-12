@@ -47,13 +47,14 @@ class KSpaceProjector:
         # Transform fractional k-points to Cartesian coordinates (A^-1)
         self.kpoints_cart = np.dot(kpoints, rec_lattice)
 
-    def define_plane_basis(self, normal_frac: np.ndarray, point_frac: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def define_plane_basis(self, normal_frac: np.ndarray, point_frac: np.ndarray, u_dir_cart: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Constructs an orthonormal basis set for the specified projection plane.
 
         Args:
             normal_frac (np.ndarray): Normal vector in fractional coordinates.
             point_frac (np.ndarray): Shift point on the plane in fractional coordinates.
+            u_dir_cart (np.ndarray, optional): Optional Cartesian vector to guide the u-axis direction. If None, an arbitrary orthogonal vector is generated.
 
         Returns:
             Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: n_hat, p_cart, u_hat, v_hat.
@@ -65,8 +66,12 @@ class KSpaceProjector:
 
         # Generate orthogonal vectors on the plane via Gram-Schmidt
         # Use a non-collinear starting vector
-        aux_vec = np.array([1.0, 0.0, 0.0]) if np.abs(n_hat[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-        u_cart = aux_vec - np.dot(aux_vec, n_hat) * n_hat
+        if u_dir_cart is not None:
+            u_cart = u_dir_cart - np.dot(u_dir_cart, n_hat) * n_hat
+        else:
+            aux_vec = np.array([1.0, 0.0, 0.0]) if np.abs(n_hat[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            u_cart = aux_vec - np.dot(aux_vec, n_hat) * n_hat
+
         u_hat = u_cart / np.linalg.norm(u_cart)
         v_hat = np.cross(n_hat, u_hat)
 
@@ -74,7 +79,8 @@ class KSpaceProjector:
 
     def interpolate_plane(self, normal_frac: np.ndarray, point_frac: np.ndarray,
                           u_range: Tuple[float, float], v_range: Tuple[float, float],
-                          grid_resolution: int = 150, interpolate_factor: int = 1) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                          grid_resolution: int = 150, interpolate_factor: int = 1,
+                          u_dir_cart: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Interpolates discrete 3D eigenvalues onto a regular 2D plane grid using Scipy.
 
@@ -89,7 +95,7 @@ class KSpaceProjector:
         Returns:
             Tuple[np.ndarray, np.ndarray, np.ndarray]: u_grid, v_grid, interpolated_spectra.
         """
-        n_hat, p_cart, u_hat, v_hat = self.define_plane_basis(normal_frac, point_frac)
+        n_hat, p_cart, u_hat, v_hat = self.define_plane_basis(normal_frac, point_frac, u_dir_cart)
 
         # Scale resolution based on Sumo's interpolation paradigms to enhance output quality
         total_resolution = int(grid_resolution * interpolate_factor)

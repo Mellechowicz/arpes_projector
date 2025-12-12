@@ -16,8 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Mode selection
     parser.add_argument(
-            "--mode", type=str, choices=["single", "multi", "surface_bz"], default="single",
-            help="Execution mode: 'single' plane projection, 'multi' plane automated projection, or 'surface_bz' analysis."
+            "--mode", type=str, choices=["single", "multi", "surface_bz", "surface_bands"], default="single",
+            help="Execution mode: 'single' plane, 'multi' automated, 'surface_bz' analysis, or 'surface_bands' path projections."
             )
 
     # I/O arguments

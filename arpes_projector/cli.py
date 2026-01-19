@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     plot_group.add_argument("--energy", type=float, default=0.0, help="Target energy relative to Fermi Level (eV) for constant energy cuts.")
     plot_group.add_argument("--broadening", type=float, default=0.05, help="Lorentzian broadening (eV) to simulate lifetime effects.")
     plot_group.add_argument("--cmap", type=str, default="magma", help="Matplotlib colormap to use for simulated intensity.")
+    plot_group.add_argument("--cscale", type=str, choices=["linear", "log", "sqrt"], default="linear", help="Colorbar scaling for ARPES intensity.")
 
     # Dispersion specific
     disp_group = parser.add_argument_group("Dispersion Slice Options")

@@ -26,6 +26,7 @@ Approach and Modules:
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Tuple, Optional
+from matplotlib.colors import LogNorm, PowerNorm
 
 # Attempt to import sumo styling for publication-ready figures
 try:
@@ -104,7 +105,8 @@ class ARPESPlotter:
 
     def plot_constant_energy_cut(self, energy: float, broadening: float = 0.05,
                                  spin_channel: int = 0, cmap: str = "inferno",
-                                 filename: Optional[str] = None):
+                                 filename: Optional[str] = None, cscale: str = "linear",
+                                 custom_title: Optional[str] = None):
         """
         Generates and saves/displays a constant energy map (e.g., Fermi surface map).
 
@@ -117,14 +119,15 @@ class ARPESPlotter:
         """
         energy_slice = np.array([energy])
         intensity = self.calculate_spectral_density(energy_slice, broadening, spin_channel)
+        norm = LogNorm(vmin=max(intensity[0].min(), 1e-5), vmax=intensity[0].max()) if cscale == "log" else (PowerNorm(0.5) if cscale == "sqrt" else None)
 
         fig, ax = plt.subplots(figsize=(6, 5))
-        im = ax.pcolormesh(self.u_grid, self.v_grid, intensity[0], cmap=cmap, shading='auto')
-        fig.colorbar(im, ax=ax, label="Simulated ARPES Intensity (arb. u.)")
+        im = ax.pcolormesh(self.u_grid, self.v_grid, intensity[0], cmap=cmap, shading='auto', norm=norm)
+        fig.colorbar(im, ax=ax, label=f"Simulated ARPES Intensity ({cscale})")
 
         ax.set_xlabel(r"$k_u$ ($\mathrm{\AA}^{-1}$)")
         ax.set_ylabel(r"$k_v$ ($\mathrm{\AA}^{-1}$)")
-        ax.set_title(f"Constant Energy Contour ($E - E_F = {energy:.2f}$ eV)")
+        ax.set_title(custom_title if custom_title else f"Constant Energy Contour ($E - E_F = {energy:.2f}$ eV)")
         ax.set_aspect('equal', 'box')
 
         plt.tight_layout()
@@ -139,7 +142,8 @@ class ARPESPlotter:
                               n_energy_points: int = 250, broadening: float = 0.05,
                               spin_channel: int = 0, cmap: str = "inferno",
                               filename: Optional[str] = None, integrate_v: bool = False,
-                              custom_xticks: Optional[list] = None, custom_xticklabels: Optional[list] = None):
+                              custom_xticks: Optional[list] = None, custom_xticklabels: Optional[list] = None,
+                              cscale: str = "linear", custom_title: Optional[str] = None):
         """
         Plots an E vs k_parallel dispersion cut along a selected axis.
 
@@ -193,9 +197,10 @@ class ARPESPlotter:
             xlabel = r"$k_u$ ($\mathrm{\AA}^{-1}$)"
             title = f"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
 
+        norm = LogNorm(vmin=max(intensity_slice.min(), 1e-5), vmax=intensity_slice.max()) if cscale == "log" else (PowerNorm(0.5) if cscale == "sqrt" else None)
         fig, ax = plt.subplots(figsize=(6, 5))
-        im = ax.pcolormesh(k_axis, energy_axis, intensity_slice, cmap=cmap, shading='auto')
-        fig.colorbar(im, ax=ax, label="Simulated ARPES Intensity (arb. u.)")
+        im = ax.pcolormesh(k_axis, energy_axis, intensity_slice, cmap=cmap, shading='auto', norm=norm)
+        fig.colorbar(im, ax=ax, label=f"Simulated ARPES Intensity ({cscale})")
 
         ax.axhline(0.0, color="w", linestyle="--", alpha=0.6, label="Fermi Level")
         ax.set_xlabel(xlabel)
@@ -208,7 +213,8 @@ class ARPESPlotter:
             ax.set_xlabel("High Symmetry Momentum Path")
         else:
             ax.set_xlabel(xlabel)
-        ax.set_title(title)
+
+        ax.set_title(custom_title if custom_title else title)
 
         plt.tight_layout()
         if filename:

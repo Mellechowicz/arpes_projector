@@ -216,3 +216,41 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# VASP input/output files (everything except vasprun.xml / vaspout.h5,
+# which are the parseable inputs for this tool)
+POSCAR
+CONTCAR
+POTCAR
+INCAR
+KPOINTS
+KPOINTS_OPT
+IBZKPT
+OUTCAR
+OSZICAR
+DOSCAR
+EIGENVAL
+PROCAR
+CHG
+CHGCAR
+WAVECAR
+WAVEDER
+LOCPOT
+ELFCAR
+PARCHG
+AECCAR*
+XDATCAR
+PCDAT
+REPORT
+vasp.out
+
+# Generated plots
+*.png
+
+# Documents
+*.tex
+*.pdf
+
+# Local helper scripts and notes
+concatenate.sh
+best_color_schemas_by_gemini.txt

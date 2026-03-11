@@ -54,6 +54,7 @@ Set the execution mode using the `--mode` flag.
 | `--outdir` | Directory path for generated plots. | `arpes_outputs` |
 | `--normal` | Fractional normal vector of the projection plane (3 values). | `0.0 0.0 1.0` |
 | `--energy` | Energy relative to Fermi Level in eV. | `0.0` |
+| `--efermi_shift` | Rigid shift (eV) of the Fermi level (`E_F -> E_F + shift`); positive emulates electron doping and moves the simulated Fermi surface. | `0.0` |
 | `--elimits` | Binding energy limits for dispersion slices (2 values). | `-3.0 1.0` |
 | `--miller_surf` | Miller index for surface slab generation (3 values). | `0 0 1` |
 
@@ -62,6 +63,11 @@ Set the execution mode using the `--mode` flag.
 **Run a single plane projection using a synthetic dataset:**
 ```bash
 python arpes.py --mode single --mock --normal 0.0 0.0 1.0 --energy -0.5
+```
+
+**Shift the Fermi level by +0.3 eV (rigid-band / doping emulation):**
+```bash
+python arpes.py --mode single --mock --normal 0.0 0.0 1.0 --efermi_shift 0.3
 ```
 
 **Generate multi-plane projections from a VASP HDF5 file:**

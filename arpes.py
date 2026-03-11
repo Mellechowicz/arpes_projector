@@ -89,11 +89,12 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             interpolate_factor=args.smooth
             )
 
-    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi)
+    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi, efermi_shift=args.efermi_shift)
 
     # 1. Constant Energy Slice
     fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}.png")
-    fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
+    shift_note = f" | $E_F$ shift: {args.efermi_shift:+.2f} eV" if args.efermi_shift else ""
+    fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}{shift_note}"
     plotter.plot_constant_energy_cut(
             energy=args.energy, broadening=args.broadening, cmap=args.cmap,
             filename=fs_file, cscale=args.cscale, custom_title=fs_title
@@ -242,7 +243,7 @@ def main():
                 grid_resolution=args.resolution, interpolate_factor=args.smooth, u_dir_cart=u_dir_cart
             )
 
-            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"])
+            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"], efermi_shift=args.efermi_shift)
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
             bands_title = f"Surface Bands {tuple(args.miller_surf)}"

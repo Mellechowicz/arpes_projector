@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Plotting & Physics arguments
     plot_group = parser.add_argument_group("Plotting & Physical Parameters")
     plot_group.add_argument("--energy", type=float, default=0.0, help="Target energy relative to Fermi Level (eV) for constant energy cuts.")
+    plot_group.add_argument("--efermi_shift", type=float, default=0.0, help="Rigid shift (eV) applied to the Fermi level (E_F -> E_F + shift). Positive values raise the chemical potential (emulating electron doping), shifting the simulated Fermi surface. Applies to constant-energy cuts and dispersion slices.")
     plot_group.add_argument("--broadening", type=float, default=0.05, help="Lorentzian broadening (eV) to simulate lifetime effects.")
     plot_group.add_argument("--cmap", type=str, default="magma", help="Matplotlib colormap to use for simulated intensity.")
     plot_group.add_argument("--cscale", type=str, choices=["linear", "log", "sqrt"], default="linear", help="Colorbar scaling for ARPES intensity.")

@@ -38,7 +38,8 @@ except ImportError:
 class ARPESPlotter:
     """Simulates physical photoemission intensities and generates publication-ready plots."""
 
-    def __init__(self, u_grid: np.ndarray, v_grid: np.ndarray, interpolated_spectra: np.ndarray, efermi: float):
+    def __init__(self, u_grid: np.ndarray, v_grid: np.ndarray, interpolated_spectra: np.ndarray, efermi: float,
+                 efermi_shift: float = 0.0):
         """
         Initialize the plotter.
 
@@ -47,10 +48,18 @@ class ARPESPlotter:
             v_grid (np.ndarray): Local in-plane coordinate axis v, shape (grid_res,).
             interpolated_spectra (np.ndarray): Interpolated energies, shape (nspin, nband, grid_res, grid_res).
             efermi (float): Fermi energy in eV.
+            efermi_shift (float): Rigid shift (eV) added to the Fermi level. A positive value
+                raises the chemical potential (electron doping), moving the simulated Fermi
+                surface. All energies are referenced to the shifted level (E - (E_F + shift)).
         """
+        if efermi is None:
+            raise ValueError("Fermi energy is None; cannot reference band energies. "
+                             "Provide a valid VASP file or set the Fermi level explicitly.")
         self.u_grid = u_grid
         self.v_grid = v_grid
-        self.spectra = interpolated_spectra - efermi  # Shift Fermi level to 0.0 eV
+        self.efermi_shift = efermi_shift
+        # Reference all energies to the (optionally shifted) Fermi level, mapping E_F + shift -> 0.0 eV
+        self.spectra = interpolated_spectra - efermi - efermi_shift
         self.efermi = 0.0
         self._apply_styles()
 

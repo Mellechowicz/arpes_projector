@@ -18,8 +18,6 @@ Approach and Modules:
 import os
 import numpy as np
 from typing import Dict, Any
-from pymatgen.io.vasp.outputs import Vasprun, BSVasprun
-from pymatgen.electronic_structure.core import Spin
 
 class VaspDataParser:
     """Parses and structures VASP electronic structure data for spectroscopic analysis."""
@@ -56,6 +54,9 @@ class VaspDataParser:
         Returns:
             Dict[str, Any]: Dictionary containing parsed arrays and floats.
         """
+        # Deferred import: keeps --mock and HDF5 workflows usable without pymatgen
+        from pymatgen.io.vasp.outputs import Vasprun, BSVasprun
+
         try:
             # Attempt to parse as band structure mode
             run = BSVasprun(self.filepath, parse_projected_eigen=False)

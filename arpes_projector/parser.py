@@ -208,7 +208,7 @@ class VaspDataParser:
 
             # Parse Fermi energy
             efermi_found = False
-            parent_group = eig_path.rsplit("/", 1)
+            parent_group = eig_path.rsplit("/", 1)[0]
             if f"{parent_group}/efermi" in f:
                 data["efermi"] = f[f"{parent_group}/efermi"][()]
                 efermi_found = True
@@ -225,13 +225,16 @@ class VaspDataParser:
 
             # Compute reciprocal lattice vectors from real-space basis
             if "results/positions/basis" in f:
-                basis = f["results/positions/basis"][-1]
+                basis = f["results/positions/basis"][:]
+                # Handle both (3, 3) final basis and (nstep, 3, 3) trajectory layouts
+                if basis.ndim == 3:
+                    basis = basis[-1]
                 # Mathematically correct triple scalar product for volume
-                vol = np.dot(basis, np.cross(basis[1], basis[2]))
+                vol = np.dot(basis[0], np.cross(basis[1], basis[2]))
                 rec_basis = np.zeros((3, 3))
-                rec_basis = 2 * np.pi * np.cross(basis[1], basis[2]) / vol
-                rec_basis[1] = 2 * np.pi * np.cross(basis[2], basis) / vol
-                rec_basis[2] = 2 * np.pi * np.cross(basis, basis[1]) / vol
+                rec_basis[0] = 2 * np.pi * np.cross(basis[1], basis[2]) / vol
+                rec_basis[1] = 2 * np.pi * np.cross(basis[2], basis[0]) / vol
+                rec_basis[2] = 2 * np.pi * np.cross(basis[0], basis[1]) / vol
                 data["rec_lattice"] = rec_basis
             else:
                 data["rec_lattice"] = np.eye(3) * 2 * np.pi

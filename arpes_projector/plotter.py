@@ -192,7 +192,7 @@ class ARPESPlotter:
                     intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
             k_axis = self.v_grid
             xlabel = r"$k_v$ ($\mathrm{\AA}^{-1}$)"
-            title = f"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
+            title = rf"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
         else:
             # Slicing along constant v coordinate
             idx = np.argmin(np.abs(self.v_grid - slice_coordinate))
@@ -204,7 +204,7 @@ class ARPESPlotter:
                     intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
             k_axis = self.u_grid
             xlabel = r"$k_u$ ($\mathrm{\AA}^{-1}$)"
-            title = f"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
+            title = rf"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
 
         norm = LogNorm(vmin=max(intensity_slice.min(), 1e-5), vmax=intensity_slice.max()) if cscale == "log" else (PowerNorm(0.5) if cscale == "sqrt" else None)
         fig, ax = plt.subplots(figsize=(6, 5))

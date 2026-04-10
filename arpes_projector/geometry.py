@@ -120,5 +120,16 @@ class KSpaceProjector:
                 flat_interp = interp(grid_cart_flat)
                 interpolated_spectra[s, b] = flat_interp.reshape(total_resolution, total_resolution)
 
+        # Points outside the convex hull of the k-point cloud interpolate to NaN;
+        # warn loudly instead of letting them silently render as blank regions.
+        nan_fraction = np.isnan(interpolated_spectra[0, 0]).mean()
+        if nan_fraction == 1.0:
+            print("[Geometry] WARNING: The requested plane lies entirely outside the "
+                  "k-point convex hull; the resulting plots will be empty. "
+                  "Check --normal, --origin, --ubounds and --vbounds.")
+        elif nan_fraction > 0.25:
+            print(f"[Geometry] WARNING: {nan_fraction:.0%} of the projection grid lies "
+                  "outside the k-point convex hull and will render as blank.")
+
         return u_grid, v_grid, interpolated_spectra
 

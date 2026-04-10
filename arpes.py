@@ -216,12 +216,7 @@ def main():
         gamma_pt = unique_pts.pop(gamma_key)
 
         for pt_info in unique_pts.values():
-#            if 'Z' in pt_info['label'][1:-1] or ('X' in pt_info['label'][1:-1] and '1' not in pt_info['label'][1:-1]):
-            if True:
-                print(f" -> Running high-symmetry point {pt_info['label']} for band projection.")
-            else:
-                print(f" -> Skipping high-symmetry point {pt_info['label']} for band projection.")
-                continue
+            print(f" -> Running high-symmetry point {pt_info['label']} for band projection.")
             p_vec = pt_info['coord']
             dist = np.linalg.norm(p_vec)
             if dist < 1e-4: continue

@@ -82,6 +82,11 @@ class SurfaceBZAnalyzer:
 
         region_idx = vor.point_region[origin_idx]
         region_vertices_indices = vor.regions[region_idx]
+        if -1 in region_vertices_indices:
+            raise RuntimeError(
+                    "Central Voronoi region is unbounded; the surface node grid is too small "
+                    "to close the 2D Wigner-Seitz cell. Increase the translation range."
+                    )
         vertices = vor.vertices[region_vertices_indices]
 
         # Sort counter-clockwise to form a closed polygon

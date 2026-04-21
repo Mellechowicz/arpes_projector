@@ -46,6 +46,25 @@ class KSpaceProjector:
         self.rec_lattice = rec_lattice
         # Transform fractional k-points to Cartesian coordinates (A^-1)
         self.kpoints_cart = np.dot(kpoints, rec_lattice)
+        # Lazily-built vector-valued interpolator shared across bands, spins and planes
+        self._interpolator = None
+
+    def build_interpolator(self) -> LinearNDInterpolator:
+        """
+        Builds (once) and returns a single vector-valued LinearNDInterpolator covering
+        every spin channel and band simultaneously.
+
+        The Delaunay triangulation of the k-point cloud is the expensive part of
+        LinearNDInterpolator; constructing one interpolator per band re-triangulated
+        the same cloud nbands*nspins times per plane. A single interpolator with
+        values of shape (nkpts, nspins*nbands) triangulates exactly once and is
+        reused by every subsequent interpolate_plane call.
+        """
+        if self._interpolator is None:
+            nspins, nbands, nkpts = self.eigenvalues.shape
+            values = self.eigenvalues.reshape(nspins * nbands, nkpts).T
+            self._interpolator = LinearNDInterpolator(self.kpoints_cart, values)
+        return self._interpolator
 
     def define_plane_basis(self, normal_frac: np.ndarray, point_frac: np.ndarray, u_dir_cart: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -111,14 +130,19 @@ class KSpaceProjector:
         grid_cart_flat = grid_cart.reshape(-1, 3)
 
         nspins, nbands, _ = self.eigenvalues.shape
-        interpolated_spectra = np.zeros((nspins, nbands, total_resolution, total_resolution))
+        interp = self.build_interpolator()
 
-        # Perform Linear Triangulation-based 3D interpolation for each band and spin channel
-        for s in range(nspins):
-            for b in range(nbands):
-                interp = LinearNDInterpolator(self.kpoints_cart, self.eigenvalues[s, b, :])
-                flat_interp = interp(grid_cart_flat)
-                interpolated_spectra[s, b] = flat_interp.reshape(total_resolution, total_resolution)
+        # Evaluate all bands and spins in one vectorized pass, chunked over grid
+        # points to bound peak memory at roughly CHUNK * nspins * nbands doubles.
+        n_pixels = grid_cart_flat.shape[0]
+        n_values = nspins * nbands
+        chunk = max(1, int(4e7) // max(1, n_values))
+        flat = np.empty((n_pixels, n_values))
+        for i0 in range(0, n_pixels, chunk):
+            flat[i0:i0 + chunk] = interp(grid_cart_flat[i0:i0 + chunk])
+
+        interpolated_spectra = np.ascontiguousarray(
+                flat.T.reshape(nspins, nbands, total_resolution, total_resolution))
 
         # Points outside the convex hull of the k-point cloud interpolate to NaN;
         # warn loudly instead of letting them silently render as blank regions.

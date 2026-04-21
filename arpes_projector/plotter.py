@@ -23,6 +23,9 @@ Approach and Modules:
  - Styling: Publication formatting via sumo.plotting.formatting.
 """
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Tuple, Optional
@@ -82,6 +85,53 @@ class ARPESPlotter:
                 'axes.titlesize': 14
                 })
 
+    @staticmethod
+    def _accumulate_lorentzian(band_values: np.ndarray, energy_array: np.ndarray, broadening: float) -> np.ndarray:
+        """
+        Vectorized Lorentzian accumulation over bands, threaded over energies.
+
+        Args:
+            band_values (np.ndarray): Band energies with the band axis first, shape (nbands, ...).
+            energy_array (np.ndarray): Energies (relative to Ef) at which to evaluate intensity.
+            broadening (float): Lorentzian HWHM in eV.
+
+        Returns:
+            np.ndarray: Accumulated intensity, shape (n_energies, ...).
+        """
+        # NaN band values (grid points outside the k-point hull) are mapped to +inf,
+        # whose Lorentzian weight is exactly 0 - equivalent to the previous
+        # nan_to_num(...) of each Lorentzian, without per-energy NaN scans.
+        bands = np.where(np.isnan(band_values), np.inf, band_values)
+        nbands = bands.shape[0]
+        cell = bands[0].size if nbands else 0
+        prefactor = broadening / np.pi
+
+        n_energies = len(energy_array)
+        intensity = np.zeros((n_energies,) + bands.shape[1:])
+        if nbands == 0 or cell == 0:
+            return intensity
+
+        # Chunk the band axis so the largest temporary stays around ~40 MB
+        band_chunk = max(1, int(5e6) // cell)
+
+        def _one_energy(idx: int):
+            acc = intensity[idx]
+            e = energy_array[idx]
+            for b0 in range(0, nbands, band_chunk):
+                block = bands[b0:b0 + band_chunk]
+                acc += (prefactor / ((e - block) ** 2 + broadening ** 2)).sum(axis=0)
+
+        # numpy releases the GIL on large ufuncs, so threads parallelize well here
+        n_workers = min(n_energies, os.cpu_count() or 1)
+        if n_workers > 1 and n_energies * nbands * cell > 1_000_000:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                list(pool.map(_one_energy, range(n_energies)))
+        else:
+            for idx in range(n_energies):
+                _one_energy(idx)
+
+        return intensity
+
     def calculate_spectral_density(self, energy_array: np.ndarray, broadening: float = 0.05, spin_channel: int = 0) -> np.ndarray:
         """
         Evaluates the Lorentzian spectral function representing intrinsic lifetime broadening.
@@ -94,23 +144,7 @@ class ARPESPlotter:
         Returns:
             np.ndarray: Calculated spectral density array, shape (n_energies, grid_res_v, grid_res_u).
         """
-        grid_res_v = len(self.v_grid)
-        grid_res_u = len(self.u_grid)
-        n_energies = len(energy_array)
-
-        intensity = np.zeros((n_energies, grid_res_v, grid_res_u))
-        nbands = self.spectra.shape[1]  # Extracted correct dimension count for bands
-
-        # Accumulate Lorentzian line-shapes for each band
-        for b in range(nbands):
-            band_energies = self.spectra[spin_channel, b]
-            if np.isnan(band_energies).all():
-                continue
-            for idx, e in enumerate(energy_array):
-                lorentzian = (1.0 / np.pi) * (broadening / ((e - band_energies) ** 2 + broadening ** 2))
-                intensity[idx] += np.nan_to_num(lorentzian, nan=0.0)
-
-        return intensity
+        return self._accumulate_lorentzian(self.spectra[spin_channel], np.asarray(energy_array), broadening)
 
     def plot_constant_energy_cut(self, energy: float, broadening: float = 0.05,
                                  spin_channel: int = 0, cmap: str = "inferno",
@@ -167,15 +201,11 @@ class ARPESPlotter:
             filename (Optional[str]): Output filename.
         """
         energy_axis = np.linspace(energy_limits[0], energy_limits[1], n_energy_points)
-        nbands = self.spectra.shape[1]  # Extracted correct dimension count for bands
 
         if integrate_v and not along_v:
-            intensity_slice = np.zeros((n_energy_points, len(self.u_grid)))
-            for b in range(nbands):
-                band_2d = self.spectra[spin_channel, b]
-                for i, e in enumerate(energy_axis):
-                    lorentzian = (1.0 / np.pi) * (broadening / ((e - band_2d) ** 2 + broadening ** 2))
-                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0).sum(axis=0)
+            # Accumulate over the full plane, then average out the v axis
+            intensity_slice = self._accumulate_lorentzian(
+                    self.spectra[spin_channel], energy_axis, broadening).sum(axis=1)
             intensity_slice /= len(self.v_grid)
             k_axis = self.u_grid
             xlabel = r"$k_\parallel$ ($\mathrm{\AA}^{-1}$)"
@@ -184,24 +214,16 @@ class ARPESPlotter:
         elif along_v:
             # Slicing along constant u coordinate
             idx = np.argmin(np.abs(self.u_grid - slice_coordinate))
-            intensity_slice = np.zeros((n_energy_points, len(self.v_grid)))
-            for b in range(nbands):
-                band_v = self.spectra[spin_channel, b, :, idx]
-                for i, e in enumerate(energy_axis):
-                    lorentzian = (1.0 / np.pi) * (broadening / ((e - band_v) ** 2 + broadening ** 2))
-                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
+            intensity_slice = self._accumulate_lorentzian(
+                    self.spectra[spin_channel, :, :, idx], energy_axis, broadening)
             k_axis = self.v_grid
             xlabel = r"$k_v$ ($\mathrm{\AA}^{-1}$)"
             title = rf"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
         else:
             # Slicing along constant v coordinate
             idx = np.argmin(np.abs(self.v_grid - slice_coordinate))
-            intensity_slice = np.zeros((n_energy_points, len(self.u_grid)))
-            for b in range(nbands):
-                band_u = self.spectra[spin_channel, b, idx, :]
-                for i, e in enumerate(energy_axis):
-                    lorentzian = (1.0 / np.pi) * (broadening / ((e - band_u) ** 2 + broadening ** 2))
-                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
+            intensity_slice = self._accumulate_lorentzian(
+                    self.spectra[spin_channel, :, idx, :], energy_axis, broadening)
             k_axis = self.u_grid
             xlabel = r"$k_u$ ($\mathrm{\AA}^{-1}$)"
             title = rf"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"

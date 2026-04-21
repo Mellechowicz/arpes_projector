@@ -112,6 +112,20 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             )
     print(f" -> Saved dispersion slice: {disp_file}")
 
+# Worker context for multi-plane parallelism: populated in the parent before the
+# fork so children inherit the projector (and its cached Delaunay triangulation)
+# copy-on-write instead of pickling it through the task queue.
+_MULTI_CTX = {}
+
+def _multi_plane_worker(task):
+    """Executes one plane projection inside a forked worker process."""
+    import matplotlib
+    matplotlib.use("Agg", force=True)  # never touch a GUI backend in a worker
+    h, k, l, plane_name = task
+    execute_projection(_MULTI_CTX["projector"], _MULTI_CTX["efermi"],
+                       _MULTI_CTX["args"], np.array([h, k, l]), plane_name)
+    return plane_name
+
 def make_bar_label(lbl: str) -> str:
     """Formats standard labels into LaTeX overbar notation for Surface BZ."""
     l = lbl.replace('$', '').replace('\\', '')
@@ -173,10 +187,26 @@ def main():
                     (1.0, 1.0, 1.0), (2.0, 1.0, 0.0), (1.0, 2.0, 0.0),
                     (1.0, 1.0, 2.0), (2.0, 0.0, 1.0), (1.0, 2.0, 1.0)
                     ]
-            for h, k, l in miller_indices:
-                normal_frac = np.array([h, k, l])
-                plane_name = f"{int(h)}{int(k)}{int(l)}"
-                execute_projection(projector, data["efermi"], args, normal_frac, plane_name)
+            tasks = [(h, k, l, f"{int(h)}{int(k)}{int(l)}") for h, k, l in miller_indices]
+
+            # Build the shared triangulation once in the parent so every forked
+            # worker inherits it copy-on-write instead of recomputing it.
+            projector.build_interpolator()
+            _MULTI_CTX.update(projector=projector, efermi=data["efermi"], args=args)
+
+            import multiprocessing
+            if hasattr(os, "fork"):
+                n_workers = min(len(tasks), os.cpu_count() or 1)
+                print(f"[Multi] Processing {len(tasks)} planes on {n_workers} parallel workers...")
+                ctx = multiprocessing.get_context("fork")
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+                    for plane_name in pool.map(_multi_plane_worker, tasks):
+                        print(f"[Multi] Plane {plane_name} complete.")
+            else:
+                # Platforms without fork (e.g. Windows) fall back to sequential execution
+                for task in tasks:
+                    _multi_plane_worker(task)
 
     elif args.mode == "surface_bz":
         # Surface Brillouin Zone Correlation Mode

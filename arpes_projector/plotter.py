@@ -166,7 +166,7 @@ class ARPESPlotter:
 
         fig, ax = plt.subplots(figsize=(6, 5))
         im = ax.pcolormesh(self.u_grid, self.v_grid, intensity[0], cmap=cmap, shading='auto', norm=norm)
-        fig.colorbar(im, ax=ax, label=f"Simulated ARPES Intensity ({cscale})")
+        fig.colorbar(im, ax=ax, label="Simulated Intensity (a.u.)")
 
         ax.set_xlabel(r"$k_u$ ($\mathrm{\AA}^{-1}$)")
         ax.set_ylabel(r"$k_v$ ($\mathrm{\AA}^{-1}$)")
@@ -231,7 +231,7 @@ class ARPESPlotter:
         norm = LogNorm(vmin=max(intensity_slice.min(), 1e-5), vmax=intensity_slice.max()) if cscale == "log" else (PowerNorm(0.5) if cscale == "sqrt" else None)
         fig, ax = plt.subplots(figsize=(6, 5))
         im = ax.pcolormesh(k_axis, energy_axis, intensity_slice, cmap=cmap, shading='auto', norm=norm)
-        fig.colorbar(im, ax=ax, label=f"Simulated ARPES Intensity ({cscale})")
+        fig.colorbar(im, ax=ax, label="Simulated Intensity (a.u.)")
 
         ax.axhline(0.0, color="w", linestyle="--", alpha=0.6, label="Fermi Level")
         ax.set_xlabel(xlabel)

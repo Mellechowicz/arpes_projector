@@ -92,9 +92,9 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
     plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi, efermi_shift=args.efermi_shift)
 
     # 1. Constant Energy Slice
+    miller_str = " ".join(f"{x:g}" for x in normal_frac)
     fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}.png")
-    shift_note = f" | $E_F$ shift: {args.efermi_shift:+.2f} eV" if args.efermi_shift else ""
-    fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}{shift_note}"
+    fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_constant_energy_cut(
             energy=args.energy, broadening=args.broadening, cmap=args.cmap,
             filename=fs_file, cscale=args.cscale, custom_title=fs_title
@@ -103,7 +103,7 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
 
     # 2. Band Dispersion Slice
     disp_file = os.path.join(args.outdir, f"dispersion_{plane_label}.png")
-    disp_title = f"Dispersion Slice\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
+    disp_title = f"Bands projected onto ({miller_str})"
     plotter.plot_dispersion_slice(
             slice_coordinate=args.slice_coord, along_v=args.along_v,
             energy_limits=tuple(args.elimits), n_energy_points=args.n_energy,
@@ -271,7 +271,7 @@ def main():
             plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"], efermi_shift=args.efermi_shift)
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
-            bands_title = f"Surface Bands {tuple(args.miller_surf)}"
+            bands_title = f"Bands projected onto ({' '.join(str(m) for m in args.miller_surf)})"
             plotter.plot_dispersion_slice(
                 slice_coordinate=0.0, along_v=False, energy_limits=tuple(args.elimits),
                 n_energy_points=args.n_energy, broadening=args.broadening, cmap=args.cmap,

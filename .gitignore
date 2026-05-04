@@ -254,3 +254,7 @@ vasp.out
 # Local helper scripts and notes
 concatenate.sh
 best_color_schemas_by_gemini.txt
+
+# Local calculation/output directories: any directory starting with "_" or a digit
+_*/
+[0-9]*/

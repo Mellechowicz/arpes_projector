@@ -258,3 +258,6 @@ best_color_schemas_by_gemini.txt
 # Local calculation/output directories: any directory starting with "_" or a digit
 _*/
 [0-9]*/
+
+# Parser cache files written next to VASP outputs
+*.arpes_cache.npz

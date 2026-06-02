@@ -114,6 +114,13 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             )
     print(f" -> Saved dispersion slice: {disp_file}")
 
+def make_bar_label(lbl: str) -> str:
+    """Formats standard labels into LaTeX overbar notation for Surface BZ."""
+    l = lbl.replace('$', '').replace('\\', '')
+    if l.upper() == 'GAMMA': return r"$\bar{\Gamma}$"
+    if '_' in l: return rf"$\bar{{{l.split('_')[0]}}}_{{{l.split('_')[1]}}}$"
+    return rf"$\bar{{{l}}}$"
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -192,6 +199,56 @@ def main():
         correlation_data = analyzer.correlate_zones()
         print(" -> Correlation Mapping Computed:", correlation_data.get("labels", "N/A"))
         analyzer.visualize()
+
+    elif args.mode == "surface_bands":
+        if input_resolved is None:
+            sys.exit("[Error] Surface bands mode requires a valid VASP file.")
+
+        print(f"\n[Surface Bands] Initializing bulk band projection for {tuple(args.miller_surf)}...")
+        analyzer = SurfaceBZAnalyzer(input_resolved)
+        analyzer.generate_slab(tuple(args.miller_surf), args.slab_min, args.vac_min)
+        corr = analyzer.correlate_zones()
+        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"])
+
+        # Filter out unique points using dictionary keys
+        unique_pts = {tuple(np.round(kpt, 4)): {'coord': kpt, 'label': make_bar_label(lbl), 'raw': lbl}
+                      for kpt, lbl in zip(corr["projected_kpts"], corr["labels"])}
+
+        gamma_key = min(unique_pts.keys(), key=np.linalg.norm)
+        gamma_pt = unique_pts.pop(gamma_key)
+
+        for pt_info in unique_pts.values():
+            p_vec = pt_info['coord']
+            dist = np.linalg.norm(p_vec)
+            if dist < 1e-4: continue
+
+            # Create strictly aligned slicing vectors
+            u_dir_aligned = np.array([p_vec[0], p_vec[1], 0.0]) / np.linalg.norm([p_vec[0], p_vec[1], 0.0])
+            n_aligned = np.cross(u_dir_aligned, np.array([0.0, 0.0, 1.0]))
+
+            # Map back to bulk Cartesian
+            u_dir_cart = u_dir_aligned @ analyzer.R_align
+            n_cart = n_aligned @ analyzer.R_align
+            normal_frac = n_cart @ np.linalg.inv(projector.rec_lattice)
+
+            print(f" -> Path: -{pt_info['raw']} -> Gamma -> +{pt_info['raw']}")
+
+            u_grid, v_grid, interp_spectra = projector.interpolate_plane(
+                normal_frac=normal_frac, point_frac=np.array([0.0, 0.0, 0.0]),
+                u_range=(-dist, dist), v_range=(-3.0, 3.0),
+                grid_resolution=args.resolution, interpolate_factor=args.smooth, u_dir_cart=u_dir_cart
+            )
+
+            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"])
+            clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
+
+            plotter.plot_dispersion_slice(
+                slice_coordinate=0.0, along_v=False, energy_limits=tuple(args.elimits),
+                n_energy_points=args.n_energy, broadening=args.broadening, cmap=args.cmap,
+                filename=os.path.join(args.outdir, f"sbz_bands_{clean}_G_{clean}.png"),
+                integrate_v=True, custom_xticks=[-dist, 0.0, dist],
+                custom_xticklabels=[f"$-{pt_info['label'][1:-1]}$", gamma_pt['label'], f"$+{pt_info['label'][1:-1]}$"]
+            )
 
     print("\nPost-processing execution complete.")
     print("=" * 80)

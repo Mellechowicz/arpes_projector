@@ -138,7 +138,8 @@ class ARPESPlotter:
                               energy_limits: Tuple[float, float] = (-2.0, 1.0),
                               n_energy_points: int = 250, broadening: float = 0.05,
                               spin_channel: int = 0, cmap: str = "inferno",
-                              filename: Optional[str] = None):
+                              filename: Optional[str] = None, integrate_v: bool = False,
+                              custom_xticks: Optional[list] = None, custom_xticklabels: Optional[list] = None):
         """
         Plots an E vs k_parallel dispersion cut along a selected axis.
 
@@ -155,7 +156,19 @@ class ARPESPlotter:
         energy_axis = np.linspace(energy_limits[0], energy_limits[1], n_energy_points)
         nbands = self.spectra.shape[1]  # Extracted correct dimension count for bands
 
-        if along_v:
+        if integrate_v and not along_v:
+            intensity_slice = np.zeros((n_energy_points, len(self.u_grid)))
+            for b in range(nbands):
+                band_2d = self.spectra[spin_channel, b]
+                for i, e in enumerate(energy_axis):
+                    lorentzian = (1.0 / np.pi) * (broadening / ((e - band_2d) ** 2 + broadening ** 2))
+                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0).sum(axis=0)
+            intensity_slice /= len(self.v_grid)
+            k_axis = self.u_grid
+            xlabel = r"$k_\parallel$ ($\mathrm{\AA}^{-1}$)"
+            title = "Projected Surface Band Structure"
+
+        elif along_v:
             # Slicing along constant u coordinate
             idx = np.argmin(np.abs(self.u_grid - slice_coordinate))
             intensity_slice = np.zeros((n_energy_points, len(self.v_grid)))
@@ -187,6 +200,14 @@ class ARPESPlotter:
         ax.axhline(0.0, color="w", linestyle="--", alpha=0.6, label="Fermi Level")
         ax.set_xlabel(xlabel)
         ax.set_ylabel(r"$E - E_F$ (eV)")
+
+        if custom_xticks is not None:
+            ax.set_xticks(custom_xticks)
+            if custom_xticklabels is not None:
+                ax.set_xticklabels(custom_xticklabels, fontsize=16)
+            ax.set_xlabel("High Symmetry Momentum Path")
+        else:
+            ax.set_xlabel(xlabel)
         ax.set_title(title)
 
         plt.tight_layout()

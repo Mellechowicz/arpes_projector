@@ -27,6 +27,7 @@ Approach and Modules:
 
 import numpy as np
 from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import Delaunay
 from typing import Tuple
 
 class KSpaceProjector:
@@ -46,24 +47,40 @@ class KSpaceProjector:
         self.rec_lattice = rec_lattice
         # Transform fractional k-points to Cartesian coordinates (A^-1)
         self.kpoints_cart = np.dot(kpoints, rec_lattice)
-        # Lazily-built vector-valued interpolator shared across bands, spins and planes
+        # Lazily-built shared geometry objects: one Delaunay triangulation of the
+        # k-point cloud serves every interpolated quantity (eigenvalues now,
+        # matrix-element weights later) across all bands, spins and planes.
+        self._triangulation = None
         self._interpolator = None
+
+    def build_triangulation(self) -> Delaunay:
+        """
+        Builds (once) and returns the Delaunay triangulation of the Cartesian
+        k-point cloud.
+
+        The triangulation is the expensive part of LinearNDInterpolator;
+        holding it explicitly lets any number of vector-valued interpolators
+        (eigenvalues, spectral weights, ...) share it at zero additional
+        triangulation cost.
+        """
+        if self._triangulation is None:
+            self._triangulation = Delaunay(self.kpoints_cart)
+        return self._triangulation
 
     def build_interpolator(self) -> LinearNDInterpolator:
         """
         Builds (once) and returns a single vector-valued LinearNDInterpolator covering
         every spin channel and band simultaneously.
 
-        The Delaunay triangulation of the k-point cloud is the expensive part of
-        LinearNDInterpolator; constructing one interpolator per band re-triangulated
-        the same cloud nbands*nspins times per plane. A single interpolator with
-        values of shape (nkpts, nspins*nbands) triangulates exactly once and is
-        reused by every subsequent interpolate_plane call.
+        Constructing one interpolator per band re-triangulated the same cloud
+        nbands*nspins times per plane. A single interpolator with values of
+        shape (nkpts, nspins*nbands), built on the shared triangulation,
+        triangulates exactly once for the projector's lifetime.
         """
         if self._interpolator is None:
             nspins, nbands, nkpts = self.eigenvalues.shape
             values = self.eigenvalues.reshape(nspins * nbands, nkpts).T
-            self._interpolator = LinearNDInterpolator(self.kpoints_cart, values)
+            self._interpolator = LinearNDInterpolator(self.build_triangulation(), values)
         return self._interpolator
 
     def define_plane_basis(self, normal_frac: np.ndarray, point_frac: np.ndarray, u_dir_cart: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

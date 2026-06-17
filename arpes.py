@@ -93,24 +93,21 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
 
     # 1. Constant Energy Slice
     fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}.png")
+    fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_constant_energy_cut(
-            energy=args.energy,
-            broadening=args.broadening,
-            cmap=args.cmap,
-            filename=fs_file
+            energy=args.energy, broadening=args.broadening, cmap=args.cmap,
+            filename=fs_file, cscale=args.cscale, custom_title=fs_title
             )
     print(f" -> Saved Fermi surface slice: {fs_file}")
 
     # 2. Band Dispersion Slice
     disp_file = os.path.join(args.outdir, f"dispersion_{plane_label}.png")
+    disp_title = f"Dispersion Slice\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_dispersion_slice(
-            slice_coordinate=args.slice_coord,
-            along_v=args.along_v,
-            energy_limits=tuple(args.elimits),
-            n_energy_points=args.n_energy,
-            broadening=args.broadening,
-            cmap=args.cmap,
-            filename=disp_file
+            slice_coordinate=args.slice_coord, along_v=args.along_v,
+            energy_limits=tuple(args.elimits), n_energy_points=args.n_energy,
+            broadening=args.broadening, cmap=args.cmap,
+            filename=disp_file, cscale=args.cscale, custom_title=disp_title
             )
     print(f" -> Saved dispersion slice: {disp_file}")
 
@@ -218,6 +215,12 @@ def main():
         gamma_pt = unique_pts.pop(gamma_key)
 
         for pt_info in unique_pts.values():
+#            if 'Z' in pt_info['label'][1:-1] or ('X' in pt_info['label'][1:-1] and '1' not in pt_info['label'][1:-1]):
+            if True:
+                print(f" -> Running high-symmetry point {pt_info['label']} for band projection.")
+            else:
+                print(f" -> Skipping high-symmetry point {pt_info['label']} for band projection.")
+                continue
             p_vec = pt_info['coord']
             dist = np.linalg.norm(p_vec)
             if dist < 1e-4: continue
@@ -242,12 +245,14 @@ def main():
             plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"])
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
+            bands_title = f"Surface Bands {tuple(args.miller_surf)}"
             plotter.plot_dispersion_slice(
                 slice_coordinate=0.0, along_v=False, energy_limits=tuple(args.elimits),
                 n_energy_points=args.n_energy, broadening=args.broadening, cmap=args.cmap,
                 filename=os.path.join(args.outdir, f"sbz_bands_{clean}_G_{clean}.png"),
                 integrate_v=True, custom_xticks=[-dist, 0.0, dist],
-                custom_xticklabels=[f"$-{pt_info['label'][1:-1]}$", gamma_pt['label'], f"$+{pt_info['label'][1:-1]}$"]
+                custom_xticklabels=[f"$-{pt_info['label'][1:-1]}$", r'$\bar{\Gamma}$', f"$+{pt_info['label'][1:-1]}$"],
+                cscale=args.cscale, custom_title=bands_title
             )
 
     print("\nPost-processing execution complete.")

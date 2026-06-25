@@ -19,6 +19,15 @@ import os
 import numpy as np
 from typing import Dict, Any
 
+# VASP's canonical lm-decomposed orbital order (LORBIT=11/12); sliced to the
+# actual column count when a file provides no field names (e.g. vaspout.h5).
+CANONICAL_ORBITALS = ["s", "py", "pz", "px", "dxy", "dyz", "dz2", "dxz", "x2-y2",
+                      "fy3x2", "fxyz", "fyz2", "fz3", "fxz2", "fzx2", "fx3"]
+
+
+class _StopParse(Exception):
+    """Raised internally to abort streaming once all needed data has been read."""
+
 
 class _ProjectedSkippingReader:
     """
@@ -100,7 +109,7 @@ class VaspDataParser:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"VASP output file not found at: {filepath}")
 
-    def parse(self, use_cache: bool = True) -> Dict[str, Any]:
+    def parse(self, use_cache: bool = True, weights_spec: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Dynamically dispatches parsing depending on the file extension.
 
@@ -108,29 +117,49 @@ class VaspDataParser:
             use_cache (bool): When True (default), reuse/write a small .npz
                 cache next to the input file so repeated invocations skip
                 re-parsing multi-GB outputs entirely.
+            weights_spec (Dict, optional): When given, per-state spectral
+                weights are reduced from the orbital/site projections during
+                parsing. Keys:
+                  "orbital_weights": mapping of orbital or shell name to weight
+                      (e.g. {"s": 1.0, "p": 0.5, "dz2": 2.0}); unlisted
+                      orbitals default to 0.0 if any weight is given for their
+                      shell's siblings, otherwise shells default from "default".
+                  "ion_weights": sequence of per-ion weights (defaults to 1.0).
 
         Returns:
             Dict[str, Any]: Structured data containing kpoints, eigenvalues, efermi,
-                            and reciprocal lattice vectors.
+                            reciprocal lattice vectors and, when requested,
+                            "weights" of shape (nspins, nbands, nkpts).
         """
+        spec_key = self._weights_spec_key(weights_spec)
         cache_path = self.filepath + ".arpes_cache.npz"
         if use_cache:
-            cached = self._load_cache(cache_path)
+            cached = self._load_cache(cache_path, spec_key)
             if cached is not None:
                 return cached
 
         _, ext = os.path.splitext(self.filepath)
         if ext.lower() == ".h5":
-            data = self._parse_h5()
+            data = self._parse_h5(weights_spec)
         else:
-            data = self._parse_xml()
+            data = self._parse_xml(weights_spec)
 
         if use_cache:
-            self._write_cache(cache_path, data)
+            self._write_cache(cache_path, data, spec_key)
         return data
 
-    def _load_cache(self, cache_path: str) -> Dict[str, Any]:
-        """Returns cached parse results if present and newer than the input, else None."""
+    @staticmethod
+    def _weights_spec_key(weights_spec) -> str:
+        """Canonical string form of a weights request, used for cache validation."""
+        if weights_spec is None:
+            return ""
+        orb = sorted((weights_spec.get("orbital_weights") or {}).items())
+        ion = list(weights_spec.get("ion_weights") or [])
+        return f"orb={orb};ion={ion}"
+
+    def _load_cache(self, cache_path: str, spec_key: str) -> Dict[str, Any]:
+        """Returns cached parse results if present, newer than the input, and
+        holding weights that match the requested spec (when one is given)."""
         try:
             # Strictly newer: equal timestamps (same clock tick) count as stale,
             # so ambiguity resolves toward re-parsing rather than stale data.
@@ -138,6 +167,8 @@ class VaspDataParser:
                     and os.path.getmtime(cache_path) > os.path.getmtime(self.filepath)):
                 return None
             with np.load(cache_path) as z:
+                if spec_key and (("weights" not in z) or str(z["weights_spec"]) != spec_key):
+                    return None      # cache lacks the requested weights
                 data = {
                         "kpoints": z["kpoints"],
                         "eigenvalues": z["eigenvalues"],
@@ -145,6 +176,8 @@ class VaspDataParser:
                         "rec_lattice": z["rec_lattice"],
                         "is_spin_polarized": bool(z["is_spin_polarized"])
                         }
+                if spec_key:
+                    data["weights"] = z["weights"]
             print(f"[Parser] Loaded cached parse results: {cache_path}")
             return data
         except Exception as exc:
@@ -152,15 +185,20 @@ class VaspDataParser:
             return None
 
     @staticmethod
-    def _write_cache(cache_path: str, data: Dict[str, Any]) -> None:
+    def _write_cache(cache_path: str, data: Dict[str, Any], spec_key: str) -> None:
         """Persists parse results next to the input file; failures are non-fatal."""
         try:
-            np.savez(cache_path,
-                     kpoints=data["kpoints"],
-                     eigenvalues=data["eigenvalues"],
-                     efermi=data["efermi"],
-                     rec_lattice=data["rec_lattice"],
-                     is_spin_polarized=data["is_spin_polarized"])
+            payload = {
+                    "kpoints": data["kpoints"],
+                    "eigenvalues": data["eigenvalues"],
+                    "efermi": data["efermi"],
+                    "rec_lattice": data["rec_lattice"],
+                    "is_spin_polarized": data["is_spin_polarized"]
+                    }
+            if data.get("weights") is not None:
+                payload["weights"] = data["weights"]
+                payload["weights_spec"] = spec_key
+            np.savez(cache_path, **payload)
             print(f"[Parser] Cached parse results to {cache_path}")
         except OSError as exc:
             print(f"[Parser] Could not write cache {cache_path}: {exc}")
@@ -170,14 +208,18 @@ class VaspDataParser:
     # from tens of GB to under ~100 MB).
     STREAM_THRESHOLD_BYTES = 100 * 1024 * 1024
 
-    def _parse_xml(self) -> Dict[str, Any]:
+    def _parse_xml(self, weights_spec: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Parses vasprun.xml, dispatching between pymatgen (small files) and the
-        constant-memory streaming parser (large files, or pymatgen missing).
+        constant-memory streaming parser (large files, pymatgen missing, or
+        whenever projection weights are requested - only the streaming path
+        can reduce them without materializing the full tensor).
 
         Returns:
             Dict[str, Any]: Dictionary containing parsed arrays and floats.
         """
+        if weights_spec is not None:
+            return self._parse_xml_stream(weights_spec)
         if os.path.getsize(self.filepath) > self.STREAM_THRESHOLD_BYTES:
             print(f"[Parser] Large vasprun.xml detected "
                   f"({os.path.getsize(self.filepath) / 1e6:.0f} MB); using streaming parser.")
@@ -188,67 +230,148 @@ class VaspDataParser:
             print("[Parser] pymatgen not available; falling back to streaming XML parser.")
             return self._parse_xml_stream()
 
-    def _parse_xml_stream(self) -> Dict[str, Any]:
+    def _parse_xml_stream(self, weights_spec: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Constant-memory vasprun.xml parser built on xml.etree.iterparse.
 
         Only the sections this suite needs are materialized (k-point list,
-        final-step eigenvalues, Fermi energy, reciprocal basis); the
-        <projected> block - typically >95% of the file - is elided from the
-        byte stream before it ever reaches the XML tokenizer, and processed
+        final-step eigenvalues, Fermi energy, reciprocal basis); processed
         elements are cleared as parsing advances.
 
+        Without a weights_spec, the <projected> block - typically >95% of the
+        file - is elided from the byte stream before it ever reaches the XML
+        tokenizer. With one, each band's (nion x norb) projection row-block is
+        reduced to a single scalar weight the moment it streams past, so the
+        projection tensor is never materialized; parsing stops early once as
+        many projection spin sets as eigenvalue spin channels have been read
+        (noncollinear files carry 4 sets - total + 3 components - of which
+        only the first is needed).
+
         Returns:
-            Dict[str, Any]: Dictionary containing parsed arrays and floats.
+            Dict[str, Any]: Dictionary containing parsed arrays and floats,
+                plus "weights" (nspins, nbands, nkpts) when requested.
         """
         import xml.etree.ElementTree as ET
 
+        want_weights = weights_spec is not None
         kpoints = None
         eigenvalues = None      # last <eigenvalues> block wins (final ionic step)
         efermi = None
         rec_lattice = None      # last <crystal> rec_basis wins (final structure)
         in_dos = False
 
+        # --- projection-reduction state (only used when want_weights) ---
+        in_projected = False
+        in_proj_eig = False     # inside the redundant <eigenvalues> copy within <projected>
+        set_depth = 0           # <set> nesting: 1 outer, 2 spin, 3 kpoint, 4 band
+        last_fields = []        # <field> names of the most recent <array> header
+        w_flat = []             # one reduced scalar per (spin, kpoint, band), document order
+        w_orb = w_ion = None
+        nion = norb = None
+        bands_in_kpt = kpts_in_spin = spins_done = 0
+        nb_proj = nk_proj = None
+
         # Elements whose subtrees are bulky and irrelevant once their end tag passes
         clear_on_end = {"scstep", "incar", "parameters", "atominfo",
                         "generation", "total", "partial", "varray", "structure"}
 
         with open(self.filepath, "rb") as raw:
-            source = _ProjectedSkippingReader(raw)
-            for event, elem in ET.iterparse(source, events=("start", "end")):
-                if event == "start":
-                    if elem.tag == "dos":
-                        in_dos = True
-                    continue
+            source = raw if want_weights else _ProjectedSkippingReader(raw)
+            try:
+                for event, elem in ET.iterparse(source, events=("start", "end")):
+                    tag = elem.tag
+                    if event == "start":
+                        if tag == "dos":
+                            in_dos = True
+                        elif tag == "projected":
+                            in_projected = True
+                        elif in_projected and not in_proj_eig:
+                            if tag == "eigenvalues":
+                                in_proj_eig = True
+                            elif tag == "array":
+                                last_fields = []
+                            elif tag == "set":
+                                set_depth += 1
+                        continue
 
-                tag = elem.tag
-                if tag == "varray":
-                    name = elem.get("name")
-                    if name == "kpointlist":
-                        kpoints = np.array(
-                                " ".join(v.text for v in elem).split(),
-                                dtype=np.float64).reshape(-1, 3)
-                    elif name == "rec_basis":
-                        # vasprun.xml stores the crystallographic reciprocal
-                        # basis (no 2*pi); include the physics convention here
-                        rec_lattice = 2.0 * np.pi * np.array(
-                                " ".join(v.text for v in elem).split(),
-                                dtype=np.float64).reshape(3, 3)
-                elif tag == "eigenvalues":
-                    parsed = self._eigenvalues_from_element(elem)
-                    if parsed is not None:
-                        eigenvalues = parsed
-                    elem.clear()
-                elif tag == "i" and in_dos and elem.get("name") == "efermi":
-                    efermi = float(elem.text)
-                elif tag == "dos":
-                    in_dos = False
-                    elem.clear()
-                elif tag == "calculation":
-                    elem.clear()
+                    # ---- end events inside <projected> (weights reduction) ----
+                    if in_projected:
+                        if tag == "projected":
+                            in_projected = False
+                            elem.clear()
+                        elif in_proj_eig:
+                            if tag == "eigenvalues":
+                                in_proj_eig = False
+                                elem.clear()    # discard the redundant eigenvalue copy
+                        elif tag == "field":
+                            last_fields.append((elem.text or "").strip())
+                        elif tag == "set":
+                            level = set_depth
+                            set_depth -= 1
+                            if level == 4:      # band set: nion rows of norb projections
+                                if w_orb is None:
+                                    rows = [r.text for r in elem]
+                                    nion = len(rows)
+                                    vals = np.array(" ".join(rows).split(),
+                                                    dtype=np.float64).reshape(nion, -1)
+                                    norb = vals.shape[1]
+                                    w_orb = self._build_orbital_vector(
+                                            last_fields, norb, weights_spec.get("orbital_weights"))
+                                    w_ion = self._build_ion_vector(
+                                            nion, weights_spec.get("ion_weights"))
+                                else:
+                                    vals = np.array(" ".join(r.text for r in elem).split(),
+                                                    dtype=np.float64).reshape(nion, norb)
+                                w_flat.append(float(w_ion @ vals @ w_orb))
+                                bands_in_kpt += 1
+                            elif level == 3:    # kpoint set complete
+                                if nb_proj is None:
+                                    nb_proj = bands_in_kpt
+                                elif bands_in_kpt != nb_proj:
+                                    raise ValueError("Inconsistent band count in <projected> block.")
+                                bands_in_kpt = 0
+                                kpts_in_spin += 1
+                            elif level == 2:    # spin set complete
+                                if nk_proj is None:
+                                    nk_proj = kpts_in_spin
+                                elif kpts_in_spin != nk_proj:
+                                    raise ValueError("Inconsistent k-point count in <projected> block.")
+                                kpts_in_spin = 0
+                                spins_done += 1
+                                if eigenvalues is not None and spins_done >= eigenvalues.shape[0]:
+                                    raise _StopParse    # all needed spin channels read
+                            elem.clear()
+                        continue
 
-                if tag in clear_on_end:
-                    elem.clear()
+                    if tag == "varray":
+                        name = elem.get("name")
+                        if name == "kpointlist":
+                            kpoints = np.array(
+                                    " ".join(v.text for v in elem).split(),
+                                    dtype=np.float64).reshape(-1, 3)
+                        elif name == "rec_basis":
+                            # vasprun.xml stores the crystallographic reciprocal
+                            # basis (no 2*pi); include the physics convention here
+                            rec_lattice = 2.0 * np.pi * np.array(
+                                    " ".join(v.text for v in elem).split(),
+                                    dtype=np.float64).reshape(3, 3)
+                    elif tag == "eigenvalues":
+                        parsed = self._eigenvalues_from_element(elem)
+                        if parsed is not None:
+                            eigenvalues = parsed
+                        elem.clear()
+                    elif tag == "i" and in_dos and elem.get("name") == "efermi":
+                        efermi = float(elem.text)
+                    elif tag == "dos":
+                        in_dos = False
+                        elem.clear()
+                    elif tag == "calculation":
+                        elem.clear()
+
+                    if tag in clear_on_end:
+                        elem.clear()
+            except _StopParse:
+                pass
 
         if eigenvalues is None or kpoints is None:
             raise ValueError(
@@ -265,6 +388,28 @@ class VaspDataParser:
         if rec_lattice is None:
             raise ValueError(f"Streaming parse of {self.filepath} found no reciprocal basis.")
 
+        weights = None
+        if want_weights:
+            if not w_flat:
+                raise ValueError(
+                        f"No <projected> block found in {self.filepath}; orbital-resolved "
+                        "weights need a calculation run with LORBIT=11 or 12.")
+            nspins = eigenvalues.shape[0]
+            expected = spins_done * nk_proj * nb_proj
+            if len(w_flat) != expected or spins_done < nspins:
+                raise ValueError(
+                        f"Projection block inconsistent: {len(w_flat)} reduced weights for "
+                        f"{spins_done} spin set(s) x {nk_proj} k-points x {nb_proj} bands.")
+            if (nb_proj, nk_proj) != eigenvalues.shape[1:]:
+                raise ValueError(
+                        f"Projection dimensions ({nb_proj} bands, {nk_proj} k-points) do not "
+                        f"match eigenvalues {eigenvalues.shape[1:]}.")
+            # (nspins, nk, nb) in document order -> (nspins, nbands, nkpts)
+            weights = np.asarray(w_flat, dtype=np.float32).reshape(
+                    spins_done, nk_proj, nb_proj).transpose(0, 2, 1)[:nspins]
+            print(f"[Parser] Reduced orbital projections to per-state weights "
+                  f"({nion} ions x {norb} orbitals; range [{weights.min():.3f}, {weights.max():.3f}]).")
+
         print(f"[Parser] Streaming parse complete: {eigenvalues.shape[0]} spin(s), "
               f"{eigenvalues.shape[1]} bands, {len(kpoints)} k-points, E_F = {efermi:.4f} eV.")
 
@@ -273,7 +418,8 @@ class VaspDataParser:
                 "eigenvalues": eigenvalues,
                 "efermi": efermi,
                 "rec_lattice": rec_lattice,
-                "is_spin_polarized": eigenvalues.shape[0] > 1
+                "is_spin_polarized": eigenvalues.shape[0] > 1,
+                "weights": weights
                 }
 
     @staticmethod
@@ -301,9 +447,48 @@ class VaspDataParser:
                     dtype=np.float64)
             nk = len(ksets)
             # rows = nk * nbands * 2 values (energy, occupation)
+            if rows.size == 0:
+                return None
             bands_k = rows.reshape(nk, -1, 2)[:, :, 0]   # (nk, nbands)
             per_spin.append(bands_k.T)                   # (nbands, nk)
         return np.stack(per_spin)
+
+    @staticmethod
+    def _build_orbital_vector(field_names, norb: int, orbital_weights) -> np.ndarray:
+        """
+        Maps a user orbital-weight spec onto the file's orbital columns.
+
+        Spec keys may be exact orbital names ("dz2", "x2-y2"), shell letters
+        ("s", "p", "d", "f"), or "default" for unlisted orbitals (0.0 if
+        omitted). No spec at all weights every orbital 1.0. Exact names win
+        over shell letters.
+        """
+        names = [n.strip().lower() for n in field_names]
+        if len(names) != norb:
+            names = CANONICAL_ORBITALS[:norb]
+        if not orbital_weights:
+            return np.ones(norb)
+        spec = {str(k).strip().lower(): float(v) for k, v in orbital_weights.items()}
+        default = spec.get("default", 0.0)
+        vec = np.full(norb, default)
+        for i, name in enumerate(names):
+            shell = "d" if name.startswith("x2") else name[0]
+            if name in spec:
+                vec[i] = spec[name]
+            elif shell in spec:
+                vec[i] = spec[shell]
+        return vec
+
+    @staticmethod
+    def _build_ion_vector(nion: int, ion_weights) -> np.ndarray:
+        """Per-ion weight vector; defaults to 1.0 for every ion."""
+        if not ion_weights:
+            return np.ones(nion)
+        vec = np.asarray(list(ion_weights), dtype=np.float64)
+        if len(vec) != nion:
+            raise ValueError(
+                    f"ion_weights has {len(vec)} entries but the calculation has {nion} ions.")
+        return vec
 
     def _parse_xml_pymatgen(self) -> Dict[str, Any]:
         """
@@ -343,10 +528,11 @@ class VaspDataParser:
                 "eigenvalues": eigenvalues,
                 "efermi": efermi,
                 "rec_lattice": rec_lattice.matrix,
-                "is_spin_polarized": bs.is_spin_polarized
+                "is_spin_polarized": bs.is_spin_polarized,
+                "weights": None
                 }
 
-    def _parse_h5(self) -> Dict[str, Any]:
+    def _parse_h5(self, weights_spec: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Directly parses vaspout.h5 using h5py.
         Uses a robust dynamic dataset matching strategy to find eigenvalues and k-points
@@ -499,5 +685,52 @@ class VaspDataParser:
 
             data["is_spin_polarized"] = evals.shape[0] > 1
 
+            data["weights"] = None
+            if weights_spec is not None:
+                data["weights"] = self._reduce_h5_projections(
+                        f, weights_spec, data["eigenvalues"].shape)
+
         return data
+
+    def _reduce_h5_projections(self, f, weights_spec: Dict[str, Any],
+                               eig_shape: tuple) -> np.ndarray:
+        """
+        Reduces the orbital projections in a vaspout.h5 to per-state weights.
+
+        The 5D projections dataset (nspin, nkpts, nbands, nion, norb) is read
+        in k-chunks and contracted immediately, so peak memory stays bounded
+        by the chunk size regardless of the dataset's full extent.
+        """
+        import h5py
+        nspins, nbands, nkpts = eig_shape
+
+        candidates = []
+        def find_projections(name, obj):
+            if isinstance(obj, h5py.Dataset) and obj.ndim == 5:
+                low = name.lower()
+                if "projector" in low or low.rsplit("/", 1)[-1] == "par":
+                    candidates.append(obj)
+        f.visititems(find_projections)
+
+        ds = next((c for c in candidates
+                   if c.shape[1] == nkpts and c.shape[2] == nbands), None)
+        if ds is None:
+            raise KeyError(
+                    "No orbital projections dataset matching the eigenvalues was found in "
+                    "vaspout.h5; orbital-resolved weights need LORBIT=11 or 12.")
+
+        nion, norb = ds.shape[3], ds.shape[4]
+        w_orb = self._build_orbital_vector([], norb, weights_spec.get("orbital_weights"))
+        w_ion = self._build_ion_vector(nion, weights_spec.get("ion_weights"))
+
+        weights = np.empty((nspins, nbands, nkpts), dtype=np.float32)
+        k_chunk = max(1, int(8e6) // max(1, nbands * nion * norb))
+        for s in range(nspins):    # noncollinear files carry extra spin sets; take the first nspins
+            for k0 in range(0, nkpts, k_chunk):
+                block = ds[s, k0:k0 + k_chunk]
+                weights[s, :, k0:k0 + k_chunk] = np.einsum(
+                        "kbio,i,o->bk", block, w_ion, w_orb, optimize=True)
+        print(f"[Parser] Reduced orbital projections to per-state weights "
+              f"({nion} ions x {norb} orbitals; range [{weights.min():.3f}, {weights.max():.3f}]).")
+        return weights
 

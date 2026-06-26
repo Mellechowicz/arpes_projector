@@ -77,10 +77,25 @@ def generate_mock_electronic_structure() -> dict:
             "is_spin_polarized": False
             }
 
+def build_weights_spec(args):
+    """Translates the matrix-element CLI flags into a parser weights_spec (or None)."""
+    if not (args.matrix_elements or args.orbital_weights or args.ion_weights):
+        return None
+    orbital_weights = None
+    if args.orbital_weights:
+        orbital_weights = {}
+        for part in args.orbital_weights.split(","):
+            name, _, value = part.partition(":")
+            orbital_weights[name.strip()] = float(value)
+    ion_weights = None
+    if args.ion_weights:
+        ion_weights = [float(x) for x in args.ion_weights.split(",")]
+    return {"orbital_weights": orbital_weights, "ion_weights": ion_weights}
+
 def execute_projection(projector, efermi, args, normal_frac, plane_label):
     """Helper method to interpolate and plot projection slices."""
     print(f"\n[Geometry] Interpolating onto plane (Normal: {normal_frac})...")
-    u_grid, v_grid, interp_spectra = projector.interpolate_plane(
+    u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
             normal_frac=normal_frac,
             point_frac=np.array(args.origin),
             u_range=tuple(args.ubounds),
@@ -89,7 +104,8 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             interpolate_factor=args.smooth
             )
 
-    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi, efermi_shift=args.efermi_shift)
+    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi,
+                           efermi_shift=args.efermi_shift, weights=interp_weights)
 
     # 1. Constant Energy Slice
     miller_str = " ".join(f"{x:g}" for x in normal_frac)
@@ -148,6 +164,7 @@ def main():
     # ---------------------------------------------------------
     data = None
     input_resolved = None
+    weights_spec = build_weights_spec(args)
 
     if args.mock:
         print("[I/O] Initializing synthetic simple-cubic tight-binding dataset...")
@@ -159,7 +176,7 @@ def main():
             if candidate and os.path.exists(candidate):
                 print(f"[I/O] Resolving calculation database: {candidate}")
                 parser_inst = VaspDataParser(candidate)
-                data = parser_inst.parse()
+                data = parser_inst.parse(weights_spec=weights_spec)
                 input_resolved = candidate
                 break
 
@@ -167,11 +184,16 @@ def main():
             print("[Warning] No VASP files found. Falling back to synthetic dataset.")
             data = generate_mock_electronic_structure()
 
+    if weights_spec is not None and data.get("weights") is None:
+        print("[Warning] Matrix-element weighting requested but no projections are "
+              "available (mock data); proceeding with uniform weights.")
+
     # ---------------------------------------------------------
     # 2. Execute Selected Mode
     # ---------------------------------------------------------
     if args.mode in ["single", "multi"]:
-        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"])
+        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"],
+                                    weights=data.get("weights"))
 
         if args.mode == "single":
             # Single Plane Execution
@@ -236,7 +258,8 @@ def main():
         analyzer = SurfaceBZAnalyzer(input_resolved)
         analyzer.generate_slab(tuple(args.miller_surf), args.slab_min, args.vac_min)
         corr = analyzer.correlate_zones()
-        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"])
+        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"],
+                                    weights=data.get("weights"))
 
         # Filter out unique points using dictionary keys
         unique_pts = {tuple(np.round(kpt, 4)): {'coord': kpt, 'label': make_bar_label(lbl), 'raw': lbl}
@@ -247,6 +270,11 @@ def main():
 
         for pt_info in unique_pts.values():
             print(f" -> Running high-symmetry point {pt_info['label']} for band projection.")
+#            if 'Z' in pt_info['label'][1:-1] or ('X' in pt_info['label'][1:-1] and '1' not in pt_info['label'][1:-1]):
+#                pass
+#            else:
+#                continue
+
             p_vec = pt_info['coord']
             dist = np.linalg.norm(p_vec)
             if dist < 1e-4: continue
@@ -262,13 +290,14 @@ def main():
 
             print(f" -> Path: -{pt_info['raw']} -> Gamma -> +{pt_info['raw']}")
 
-            u_grid, v_grid, interp_spectra = projector.interpolate_plane(
+            u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
                 normal_frac=normal_frac, point_frac=np.array([0.0, 0.0, 0.0]),
                 u_range=(-dist, dist), v_range=(-3.0, 3.0),
                 grid_resolution=args.resolution, interpolate_factor=args.smooth, u_dir_cart=u_dir_cart
             )
 
-            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"], efermi_shift=args.efermi_shift)
+            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"],
+                                   efermi_shift=args.efermi_shift, weights=interp_weights)
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
             bands_title = f"Bands projected onto ({' '.join(str(m) for m in args.miller_surf)})"

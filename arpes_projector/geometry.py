@@ -33,7 +33,8 @@ from typing import Tuple
 class KSpaceProjector:
     """Performs coordinates transformation, plane projection, and multidimensional interpolation."""
 
-    def __init__(self, kpoints: np.ndarray, eigenvalues: np.ndarray, rec_lattice: np.ndarray):
+    def __init__(self, kpoints: np.ndarray, eigenvalues: np.ndarray, rec_lattice: np.ndarray,
+                 weights: np.ndarray = None):
         """
         Initialize the projector.
 
@@ -41,9 +42,16 @@ class KSpaceProjector:
             kpoints (np.ndarray): Fractional k-points coordinates, shape (nkpts, 3).
             eigenvalues (np.ndarray): Eigenvalues array, shape (nspins, nbands, nkpts).
             rec_lattice (np.ndarray): Reciprocal lattice matrix, shape (3, 3).
+            weights (np.ndarray, optional): Per-state spectral weights (e.g. reduced
+                orbital projections), shape (nspins, nbands, nkpts). Interpolated
+                alongside the eigenvalues on the same triangulation.
         """
+        if weights is not None and weights.shape != eigenvalues.shape:
+            raise ValueError(f"weights shape {weights.shape} does not match "
+                             f"eigenvalues shape {eigenvalues.shape}.")
         self.kpoints_frac = kpoints
         self.eigenvalues = eigenvalues
+        self.weights = weights
         self.rec_lattice = rec_lattice
         # Transform fractional k-points to Cartesian coordinates (A^-1)
         self.kpoints_cart = np.dot(kpoints, rec_lattice)
@@ -80,6 +88,10 @@ class KSpaceProjector:
         if self._interpolator is None:
             nspins, nbands, nkpts = self.eigenvalues.shape
             values = self.eigenvalues.reshape(nspins * nbands, nkpts).T
+            if self.weights is not None:
+                # Weights ride along as extra value columns: the expensive
+                # simplex lookup per query point is paid once for both.
+                values = np.hstack([values, self.weights.reshape(nspins * nbands, nkpts).T])
             self._interpolator = LinearNDInterpolator(self.build_triangulation(), values)
         return self._interpolator
 
@@ -116,7 +128,8 @@ class KSpaceProjector:
     def interpolate_plane(self, normal_frac: np.ndarray, point_frac: np.ndarray,
                           u_range: Tuple[float, float], v_range: Tuple[float, float],
                           grid_resolution: int = 150, interpolate_factor: int = 1,
-                          u_dir_cart: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                          u_dir_cart: np.ndarray = None
+                          ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Interpolates discrete 3D eigenvalues onto a regular 2D plane grid using Scipy.
 
@@ -129,7 +142,9 @@ class KSpaceProjector:
             interpolate_factor (int): Scaling factor matching sumo smoothing defaults.
 
         Returns:
-            Tuple[np.ndarray, np.ndarray, np.ndarray]: u_grid, v_grid, interpolated_spectra.
+            Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: u_grid, v_grid,
+                interpolated_spectra, and interpolated per-state weights (None when
+                the projector was built without weights).
         """
         n_hat, p_cart, u_hat, v_hat = self.define_plane_basis(normal_frac, point_frac, u_dir_cart)
 
@@ -150,16 +165,21 @@ class KSpaceProjector:
         interp = self.build_interpolator()
 
         # Evaluate all bands and spins in one vectorized pass, chunked over grid
-        # points to bound peak memory at roughly CHUNK * nspins * nbands doubles.
+        # points to bound peak memory at roughly CHUNK * n_values doubles.
         n_pixels = grid_cart_flat.shape[0]
-        n_values = nspins * nbands
+        n_eig = nspins * nbands
+        n_values = n_eig * (2 if self.weights is not None else 1)
         chunk = max(1, int(4e7) // max(1, n_values))
         flat = np.empty((n_pixels, n_values))
         for i0 in range(0, n_pixels, chunk):
             flat[i0:i0 + chunk] = interp(grid_cart_flat[i0:i0 + chunk])
 
         interpolated_spectra = np.ascontiguousarray(
-                flat.T.reshape(nspins, nbands, total_resolution, total_resolution))
+                flat[:, :n_eig].T.reshape(nspins, nbands, total_resolution, total_resolution))
+        interpolated_weights = None
+        if self.weights is not None:
+            interpolated_weights = np.ascontiguousarray(
+                    flat[:, n_eig:].T.reshape(nspins, nbands, total_resolution, total_resolution))
 
         # Points outside the convex hull of the k-point cloud interpolate to NaN;
         # warn loudly instead of letting them silently render as blank regions.
@@ -172,5 +192,5 @@ class KSpaceProjector:
             print(f"[Geometry] WARNING: {nan_fraction:.0%} of the projection grid lies "
                   "outside the k-point convex hull and will render as blank.")
 
-        return u_grid, v_grid, interpolated_spectra
+        return u_grid, v_grid, interpolated_spectra, interpolated_weights
 

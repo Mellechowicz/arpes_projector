@@ -43,6 +43,17 @@ def build_parser() -> argparse.ArgumentParser:
     plot_group.add_argument("--cmap", type=str, default="magma", help="Matplotlib colormap to use for simulated intensity.")
     plot_group.add_argument("--cscale", type=str, choices=["linear", "log", "sqrt"], default="linear", help="Colorbar scaling for ARPES intensity.")
 
+    # Matrix-element weighting (orbital/site-projected intensities)
+    me_group = parser.add_argument_group("Matrix-Element Weighting (requires LORBIT=11/12)")
+    me_group.add_argument("--matrix_elements", action="store_true",
+                          help="Weight each state's intensity by its orbital/site projection instead of treating all states equally.")
+    me_group.add_argument("--orbital_weights", type=str, default=None,
+                          help="Comma-separated orbital or shell weights, e.g. 's:1,p:0.5,dz2:2' or 'd:1'. "
+                               "Unlisted orbitals default to 0 (override with 'default:x'). Implies --matrix_elements.")
+    me_group.add_argument("--ion_weights", type=str, default=None,
+                          help="Comma-separated per-ion weights in POSCAR order, e.g. '1,1,0,0,0.5,0.5'. "
+                               "Defaults to 1 for every ion. Implies --matrix_elements.")
+
     # Dispersion specific
     disp_group = parser.add_argument_group("Dispersion Slice Options")
     disp_group.add_argument("--elimits", nargs=2, type=float, default=[-3.0, 1.0], help="Binding energy limits (E - Ef) in eV for dispersion slices.")

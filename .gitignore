@@ -244,8 +244,9 @@ PCDAT
 REPORT
 vasp.out
 
-# Generated plots
+# Generated plots (exemplary check-suite outputs stay tracked)
 *.png
+!tests/outputs/**/*.png
 
 # Documents
 *.tex

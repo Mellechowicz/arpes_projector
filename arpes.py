@@ -31,6 +31,7 @@ from arpes_projector.geometry import KSpaceProjector
 from arpes_projector.plotter import ARPESPlotter
 from arpes_projector.surface_bz import SurfaceBZAnalyzer
 from arpes_projector.cli import build_parser
+from arpes_projector import matrix_elements as me
 
 def generate_mock_electronic_structure() -> dict:
     """
@@ -77,10 +78,39 @@ def generate_mock_electronic_structure() -> dict:
             "is_spin_polarized": False
             }
 
+def load_matrix_element_weights(args, input_resolved, eigenvalues):
+    """
+    Reduces the VASP orbital projections to one intensity weight per state.
+
+    Returns None when matrix-element weighting was not requested. The number of
+    projection sets read is driven by the eigenvalue spin-channel count, which
+    selects the charge projection for a noncollinear run (whose four sets are
+    total, m_x, m_y, m_z rather than spin channels).
+    """
+    if not (args.matrix_elements or args.orbital_weights or args.ion_weights):
+        return None
+    if input_resolved is None:
+        print("[Warning] Matrix-element weighting needs a real VASP file with projections; "
+              "continuing with uniform weights.")
+        return None
+    if not input_resolved.lower().endswith(".xml"):
+        print("[Warning] Matrix-element weighting currently reads projections from vasprun.xml "
+              "only; continuing with uniform weights.")
+        return None
+    weights, _ = me.reduce_projections_xml(
+            input_resolved,
+            orbital_spec=me.parse_orbital_spec(args.orbital_weights),
+            ion_spec=me.parse_ion_spec(args.ion_weights),
+            n_sets=eigenvalues.shape[0])
+    if weights.shape != eigenvalues.shape:
+        raise ValueError(f"projection weights {weights.shape} do not match "
+                         f"eigenvalues {eigenvalues.shape}")
+    return weights
+
 def execute_projection(projector, efermi, args, normal_frac, plane_label):
     """Helper method to interpolate and plot projection slices."""
     print(f"\n[Geometry] Interpolating onto plane (Normal: {normal_frac})...")
-    u_grid, v_grid, interp_spectra = projector.interpolate_plane(
+    u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
             normal_frac=normal_frac,
             point_frac=np.array(args.origin),
             u_range=tuple(args.ubounds),
@@ -89,7 +119,7 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             interpolate_factor=args.smooth
             )
 
-    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi)
+    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi, weights=interp_weights)
 
     # 1. Constant Energy Slice
     fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}.png")
@@ -155,8 +185,11 @@ def main():
     # ---------------------------------------------------------
     # 2. Execute Selected Mode
     # ---------------------------------------------------------
+    me_weights = load_matrix_element_weights(args, input_resolved, data["eigenvalues"])
+
     if args.mode in ["single", "multi"]:
-        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"])
+        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"],
+                                    weights=me_weights)
 
         if args.mode == "single":
             # Single Plane Execution
@@ -205,7 +238,8 @@ def main():
         analyzer = SurfaceBZAnalyzer(input_resolved)
         analyzer.generate_slab(tuple(args.miller_surf), args.slab_min, args.vac_min)
         corr = analyzer.correlate_zones()
-        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"])
+        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"],
+                                    weights=me_weights)
 
         # Filter out unique points using dictionary keys
         unique_pts = {tuple(np.round(kpt, 4)): {'coord': kpt, 'label': make_bar_label(lbl), 'raw': lbl}
@@ -236,13 +270,13 @@ def main():
 
             print(f" -> Path: -{pt_info['raw']} -> Gamma -> +{pt_info['raw']}")
 
-            u_grid, v_grid, interp_spectra = projector.interpolate_plane(
+            u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
                 normal_frac=normal_frac, point_frac=np.array([0.0, 0.0, 0.0]),
                 u_range=(-dist, dist), v_range=(-3.0, 3.0),
                 grid_resolution=args.resolution, interpolate_factor=args.smooth, u_dir_cart=u_dir_cart
             )
 
-            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"])
+            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"], weights=interp_weights)
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
             bands_title = f"Surface Bands {tuple(args.miller_surf)}"

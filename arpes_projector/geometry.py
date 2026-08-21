@@ -32,7 +32,8 @@ from typing import Tuple
 class KSpaceProjector:
     """Performs coordinates transformation, plane projection, and multidimensional interpolation."""
 
-    def __init__(self, kpoints: np.ndarray, eigenvalues: np.ndarray, rec_lattice: np.ndarray):
+    def __init__(self, kpoints: np.ndarray, eigenvalues: np.ndarray, rec_lattice: np.ndarray,
+                 weights: np.ndarray = None):
         """
         Initialize the projector.
 
@@ -41,8 +42,12 @@ class KSpaceProjector:
             eigenvalues (np.ndarray): Eigenvalues array, shape (nspins, nbands, nkpts).
             rec_lattice (np.ndarray): Reciprocal lattice matrix, shape (3, 3).
         """
+        if weights is not None and weights.shape != eigenvalues.shape:
+            raise ValueError(f"weights shape {weights.shape} does not match "
+                             f"eigenvalues shape {eigenvalues.shape}")
         self.kpoints_frac = kpoints
         self.eigenvalues = eigenvalues
+        self.weights = weights
         self.rec_lattice = rec_lattice
         # Transform fractional k-points to Cartesian coordinates (A^-1)
         self.kpoints_cart = np.dot(kpoints, rec_lattice)
@@ -112,13 +117,25 @@ class KSpaceProjector:
 
         nspins, nbands, _ = self.eigenvalues.shape
         interpolated_spectra = np.zeros((nspins, nbands, total_resolution, total_resolution))
+        interpolated_weights = (None if self.weights is None else
+                                np.zeros((nspins, nbands, total_resolution, total_resolution)))
 
-        # Perform Linear Triangulation-based 3D interpolation for each band and spin channel
+        # Perform Linear Triangulation-based 3D interpolation for each band and spin channel.
+        # Matrix-element weights ride along as a second value column so the expensive
+        # simplex lookup for each query point is paid once for both quantities.
         for s in range(nspins):
             for b in range(nbands):
-                interp = LinearNDInterpolator(self.kpoints_cart, self.eigenvalues[s, b, :])
+                if self.weights is None:
+                    values = self.eigenvalues[s, b, :]
+                else:
+                    values = np.column_stack([self.eigenvalues[s, b, :], self.weights[s, b, :]])
+                interp = LinearNDInterpolator(self.kpoints_cart, values)
                 flat_interp = interp(grid_cart_flat)
-                interpolated_spectra[s, b] = flat_interp.reshape(total_resolution, total_resolution)
+                if self.weights is None:
+                    interpolated_spectra[s, b] = flat_interp.reshape(total_resolution, total_resolution)
+                else:
+                    interpolated_spectra[s, b] = flat_interp[:, 0].reshape(total_resolution, total_resolution)
+                    interpolated_weights[s, b] = flat_interp[:, 1].reshape(total_resolution, total_resolution)
 
-        return u_grid, v_grid, interpolated_spectra
+        return u_grid, v_grid, interpolated_spectra, interpolated_weights
 

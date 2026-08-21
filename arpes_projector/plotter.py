@@ -38,7 +38,8 @@ except ImportError:
 class ARPESPlotter:
     """Simulates physical photoemission intensities and generates publication-ready plots."""
 
-    def __init__(self, u_grid: np.ndarray, v_grid: np.ndarray, interpolated_spectra: np.ndarray, efermi: float):
+    def __init__(self, u_grid: np.ndarray, v_grid: np.ndarray, interpolated_spectra: np.ndarray, efermi: float,
+                 weights: np.ndarray = None):
         """
         Initialize the plotter.
 
@@ -48,9 +49,13 @@ class ARPESPlotter:
             interpolated_spectra (np.ndarray): Interpolated energies, shape (nspin, nband, grid_res, grid_res).
             efermi (float): Fermi energy in eV.
         """
+        if efermi is None:
+            raise ValueError("Fermi energy is None; cannot reference band energies")
         self.u_grid = u_grid
         self.v_grid = v_grid
         self.spectra = interpolated_spectra - efermi  # Shift Fermi level to 0.0 eV
+        # Per-state matrix-element weights; None weights every state equally.
+        self.weights = None if weights is None else np.nan_to_num(weights, nan=0.0)
         self.efermi = 0.0
         self._apply_styles()
 
@@ -97,9 +102,11 @@ class ARPESPlotter:
             band_energies = self.spectra[spin_channel, b]
             if np.isnan(band_energies).all():
                 continue
+            wb = None if self.weights is None else self.weights[spin_channel, b]
             for idx, e in enumerate(energy_array):
                 lorentzian = (1.0 / np.pi) * (broadening / ((e - band_energies) ** 2 + broadening ** 2))
-                intensity[idx] += np.nan_to_num(lorentzian, nan=0.0)
+                lorentzian = np.nan_to_num(lorentzian, nan=0.0)
+                intensity[idx] += lorentzian if wb is None else lorentzian * wb
 
         return intensity
 
@@ -164,9 +171,13 @@ class ARPESPlotter:
             intensity_slice = np.zeros((n_energy_points, len(self.u_grid)))
             for b in range(nbands):
                 band_2d = self.spectra[spin_channel, b]
+                wb = None if self.weights is None else self.weights[spin_channel, b]
                 for i, e in enumerate(energy_axis):
                     lorentzian = (1.0 / np.pi) * (broadening / ((e - band_2d) ** 2 + broadening ** 2))
-                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0).sum(axis=0)
+                    lorentzian = np.nan_to_num(lorentzian, nan=0.0)
+                    if wb is not None:
+                        lorentzian = lorentzian * wb
+                    intensity_slice[i] += lorentzian.sum(axis=0)
             intensity_slice /= len(self.v_grid)
             k_axis = self.u_grid
             xlabel = r"$k_\parallel$ ($\mathrm{\AA}^{-1}$)"
@@ -178,9 +189,11 @@ class ARPESPlotter:
             intensity_slice = np.zeros((n_energy_points, len(self.v_grid)))
             for b in range(nbands):
                 band_v = self.spectra[spin_channel, b, :, idx]
+                wb = None if self.weights is None else self.weights[spin_channel, b, :, idx]
                 for i, e in enumerate(energy_axis):
                     lorentzian = (1.0 / np.pi) * (broadening / ((e - band_v) ** 2 + broadening ** 2))
-                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
+                    lorentzian = np.nan_to_num(lorentzian, nan=0.0)
+                    intensity_slice[i] += lorentzian if wb is None else lorentzian * wb
             k_axis = self.v_grid
             xlabel = r"$k_v$ ($\mathrm{\AA}^{-1}$)"
             title = f"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
@@ -190,9 +203,11 @@ class ARPESPlotter:
             intensity_slice = np.zeros((n_energy_points, len(self.u_grid)))
             for b in range(nbands):
                 band_u = self.spectra[spin_channel, b, idx, :]
+                wb = None if self.weights is None else self.weights[spin_channel, b, idx, :]
                 for i, e in enumerate(energy_axis):
                     lorentzian = (1.0 / np.pi) * (broadening / ((e - band_u) ** 2 + broadening ** 2))
-                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
+                    lorentzian = np.nan_to_num(lorentzian, nan=0.0)
+                    intensity_slice[i] += lorentzian if wb is None else lorentzian * wb
             k_axis = self.u_grid
             xlabel = r"$k_u$ ($\mathrm{\AA}^{-1}$)"
             title = f"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"

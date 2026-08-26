@@ -102,7 +102,7 @@ class VaspDataParser:
             # 1. Gather all candidate k-points datasets
             kpoints_candidates = {}
             def find_kpoints(name, obj):
-                if isinstance(obj, h5py.Dataset) and "kpoints" in name.lower():
+                if isinstance(obj, h5py.Dataset) and "kpoint" in name.lower():
                     shape = obj.shape
                     # Valid kpoints dataset should be 2D with shape (N, 3)
                     if len(shape) == 2 and shape[1] == 3:
@@ -163,7 +163,9 @@ class VaspDataParser:
                 for p in potential_paths:
                     if p in f:
                         eig_ds = f[p]
-                        kp_path = p.replace("eigenvalues", "kpoints")
+                        group = p.rsplit("/", 1)[0]
+                        kp_path = next((c for c in (f"{group}/kpoint_coords", f"{group}/kpoints")
+                                        if c in f), f"{group}/kpoints")
                         if kp_path in f:
                             matched_pair = {
                                     "eig_path": p,
@@ -208,7 +210,7 @@ class VaspDataParser:
 
             # Parse Fermi energy
             efermi_found = False
-            parent_group = eig_path.rsplit("/", 1)
+            parent_group = eig_path.rsplit("/", 1)[0]
             if f"{parent_group}/efermi" in f:
                 data["efermi"] = f[f"{parent_group}/efermi"][()]
                 efermi_found = True
@@ -223,18 +225,39 @@ class VaspDataParser:
             if not efermi_found:
                 data["efermi"] = 0.0
 
-            # Compute reciprocal lattice vectors from real-space basis
-            if "results/positions/basis" in f:
-                basis = f["results/positions/basis"][-1]
-                # Mathematically correct triple scalar product for volume
-                vol = np.dot(basis, np.cross(basis[1], basis[2]))
-                rec_basis = np.zeros((3, 3))
-                rec_basis = 2 * np.pi * np.cross(basis[1], basis[2]) / vol
-                rec_basis[1] = 2 * np.pi * np.cross(basis[2], basis) / vol
-                rec_basis[2] = 2 * np.pi * np.cross(basis, basis[1]) / vol
-                data["rec_lattice"] = rec_basis
-            else:
-                data["rec_lattice"] = np.eye(3) * 2 * np.pi
+            # Compute reciprocal lattice vectors from the real-space basis.
+            # VASP writes the cell as results/positions/lattice_vectors; older/other
+            # layouts use results/positions/basis, and the POSCAR copy needs its scale.
+            basis = None
+            for path in ("results/positions/lattice_vectors", "results/positions/basis"):
+                if path in f:
+                    basis = np.asarray(f[path][()], dtype=float)
+                    break
+            if basis is None and "input/poscar/lattice_vectors" in f:
+                basis = np.asarray(f["input/poscar/lattice_vectors"][()], dtype=float)
+                if "input/poscar/scale" in f:
+                    basis = basis * float(f["input/poscar/scale"][()])
+            if basis is None:
+                raise KeyError(
+                        "No lattice vectors found in vaspout.h5 (looked for "
+                        "results/positions/lattice_vectors, results/positions/basis and "
+                        "input/poscar/lattice_vectors). Refusing to guess a reciprocal "
+                        "lattice: every k-space coordinate would be wrong.")
+            # Trajectory layouts store (nstep, 3, 3); take the final step.
+            if basis.ndim == 3:
+                basis = basis[-1]
+            if basis.shape != (3, 3):
+                raise ValueError(f"lattice vectors have shape {basis.shape}, expected (3, 3)")
+
+            # b_i = 2*pi (a_j x a_k) / V   with   V = a_0 . (a_1 x a_2)
+            vol = float(np.dot(basis[0], np.cross(basis[1], basis[2])))
+            if abs(vol) < 1e-12:
+                raise ValueError("degenerate lattice vectors: cell volume is zero")
+            rec_basis = np.empty((3, 3))
+            rec_basis[0] = 2 * np.pi * np.cross(basis[1], basis[2]) / vol
+            rec_basis[1] = 2 * np.pi * np.cross(basis[2], basis[0]) / vol
+            rec_basis[2] = 2 * np.pi * np.cross(basis[0], basis[1]) / vol
+            data["rec_lattice"] = rec_basis
 
             data["is_spin_polarized"] = evals.shape[0] > 1
 

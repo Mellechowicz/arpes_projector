@@ -238,3 +238,72 @@ def reduce_projections_xml(filepath, orbital_spec=None, ion_spec=None,
               f"{nb} bands x {nk} k-points; weight range "
               f"[{weights.min():.4f}, {weights.max():.4f}]")
     return weights, meta
+
+
+def reduce_projections_h5(filepath, orbital_spec=None, ion_spec=None,
+                          n_sets=1, k_chunk_bytes=64 << 20, verbose=True):
+    """
+    Reduces the orbital projections in a vaspout.h5 to per-state weights.
+
+    VASP stores them at results/projectors/par with axis order
+    (nset, nion, norb, nkpt, nband) - note this differs from the vasprun.xml
+    ordering - and the array reaches gigabytes (2.44 GB for a 5832-point mesh
+    with 136 bands). It is therefore read in k-chunks and contracted
+    immediately, so peak memory is bounded by one chunk rather than the file.
+
+    The leading axis carries the same noncollinear trap as the XML path: for a
+    noncollinear run its four entries are (total, m_x, m_y, m_z), so n_sets
+    should be the number of eigenvalue spin channels.
+
+    Returns:
+        (weights, meta) with weights of shape (n_sets, nbands, nkpts), float32.
+    """
+    import h5py
+
+    with h5py.File(filepath, "r") as f:
+        ds = None
+        for path in ("results/projectors/par", "results/projections/par"):
+            if path in f:
+                ds = f[path]
+                break
+        if ds is None:
+            found = []
+            f.visititems(lambda n, o: found.append(n)
+                         if isinstance(o, h5py.Dataset) and o.ndim == 5 else None)
+            raise KeyError(
+                    "No orbital projections found in vaspout.h5 (expected "
+                    "results/projectors/par); matrix-element weighting requires "
+                    f"LORBIT=11 or 12. 5-D datasets present: {found}")
+
+        nset, nion, norb, nk, nb = ds.shape
+        if n_sets > nset:
+            raise ValueError(f"requested {n_sets} projection sets but the file has {nset}")
+
+        # Orbital names live alongside the array as fixed-width bytes.
+        fields = []
+        lchar = ds.parent.get("lchar")
+        if lchar is not None:
+            fields = [x.decode() if isinstance(x, bytes) else str(x) for x in lchar[()]]
+
+        w_orb = build_orbital_vector(fields, norb, orbital_spec)
+        w_ion = build_ion_vector(nion, ion_spec)
+
+        # Bound the working set: one chunk is nion*norb*chunk*nb float64.
+        per_k = nion * norb * nb * 8
+        chunk = max(1, int(k_chunk_bytes // max(1, per_k)))
+
+        weights = np.empty((n_sets, nb, nk), dtype=np.float32)
+        for s in range(n_sets):
+            for k0 in range(0, nk, chunk):
+                block = ds[s, :, :, k0:k0 + chunk, :]          # (nion, norb, dk, nb)
+                weights[s, :, k0:k0 + chunk] = np.einsum(
+                        "iokb,i,o->bk", block, w_ion, w_orb, optimize=True)
+
+    meta = {"nion": nion, "norb": norb, "fields": fields, "orbital_vector": w_orb,
+            "ion_vector": w_ion, "nbands": nb, "nkpts": nk, "n_sets": n_sets,
+            "k_chunk": chunk}
+    if verbose:
+        print(f"[MatrixElements] Reduced {nion} ions x {norb} orbitals over "
+              f"{nb} bands x {nk} k-points (k-chunk {chunk}); weight range "
+              f"[{weights.min():.4f}, {weights.max():.4f}]")
+    return weights, meta

@@ -93,11 +93,9 @@ def load_matrix_element_weights(args, input_resolved, eigenvalues):
         print("[Warning] Matrix-element weighting needs a real VASP file with projections; "
               "continuing with uniform weights.")
         return None
-    if not input_resolved.lower().endswith(".xml"):
-        print("[Warning] Matrix-element weighting currently reads projections from vasprun.xml "
-              "only; continuing with uniform weights.")
-        return None
-    weights, _ = me.reduce_projections_xml(
+    reduce = (me.reduce_projections_h5 if input_resolved.lower().endswith(".h5")
+              else me.reduce_projections_xml)
+    weights, _ = reduce(
             input_resolved,
             orbital_spec=me.parse_orbital_spec(args.orbital_weights),
             ion_spec=me.parse_ion_spec(args.ion_weights),

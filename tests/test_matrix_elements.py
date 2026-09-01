@@ -97,5 +97,36 @@ else:
           w4.min() < 0 and w_t.min() >= -1e-3,
           f"4 sets span [{w4.min():.3f},{w4.max():.3f}], 1 set [{w_t.min():.3f},{w_t.max():.3f}]")
 
+H5 = os.path.join(REPO, "080", "vaspout.h5")
+if not os.path.exists(H5):
+    print("[SKIP] HDF5 checks (080/vaspout.h5 absent)")
+else:
+    import h5py
+    from arpes_projector.matrix_elements import reduce_projections_h5
+    h_t, hmeta = reduce_projections_h5(H5, None, n_sets=1, verbose=False)
+    h_d, _ = reduce_projections_h5(H5, parse_orbital_spec("d:1"), n_sets=1, verbose=False)
+    h_s, _ = reduce_projections_h5(H5, parse_orbital_spec("s:1"), n_sets=1, verbose=False)
+    check("h5 shape is (nsets, nbands, nkpts)", h_t.shape == (1, 136, 5832), str(h_t.shape))
+    check("h5 orbital names read from lchar",
+          [n.strip() for n in hmeta["fields"][:4]] == ["s", "py", "pz", "px"])
+    # Reference computed directly from the raw 5-D dataset for a slice of k-points.
+    with h5py.File(H5, "r") as fh:
+        par = fh["results/projectors/par"]
+        ref_t = par[0, :, :, :40, :].sum(axis=(0, 1)).T
+        lch = [x.decode().strip() for x in fh["results/projectors/lchar"][()]]
+        dcols = [i for i, n in enumerate(lch) if n.startswith("d") or n.startswith("x2")]
+        ref_d = par[0, :, dcols, :40, :].sum(axis=(0, 1)).T
+    check("h5 total matches a direct sum over the raw dataset",
+          np.allclose(h_t[0, :, :40], ref_t, atol=1e-5),
+          f"max dev {np.abs(h_t[0,:,:40]-ref_t).max():.1e}")
+    check("h5 d-shell matches a direct sum (x2-y2 included)",
+          np.allclose(h_d[0, :, :40], ref_d, atol=1e-5) and len(dcols) == 5)
+    check("h5 orbital subset never exceeds the total",
+          bool((h_s <= h_t + 1e-4).all() and (h_d <= h_t + 1e-4).all()))
+    h4, _ = reduce_projections_h5(H5, None, n_sets=4, verbose=False)
+    check("h5 noncollinear magnetisation sets excluded by n_sets=1",
+          h4.min() < 0 and h_t.min() >= -1e-3,
+          f"4 sets [{h4.min():.3f},{h4.max():.3f}], 1 set [{h_t.min():.3f},{h_t.max():.3f}]")
+
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))
 sys.exit(1 if FAIL else 0)

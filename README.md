@@ -54,6 +54,10 @@ Set the execution mode using the `--mode` flag.
 | `--outdir` | Directory path for generated plots. | `arpes_outputs` |
 | `--normal` | Fractional normal vector of the projection plane (3 values). | `0.0 0.0 1.0` |
 | `--energy` | Energy relative to Fermi Level in eV. | `0.0` |
+| `--efermi_shift` | Rigid shift (eV) of the Fermi level (`E_F -> E_F + shift`); positive emulates electron doping and moves the simulated Fermi surface. | `0.0` |
+| `--matrix_elements` | Weight each state's intensity by its orbital/site projection (requires `LORBIT=11/12`). | `False` |
+| `--orbital_weights` | Orbital or shell weights, e.g. `s:1,p:0.5` or `dz2:2`; unlisted orbitals get 0 (or `default:x`). Implies `--matrix_elements`. | None |
+| `--ion_weights` | Per-ion weights in POSCAR order, e.g. `1,1,0,0,0.5,0.5`. Implies `--matrix_elements`. | None |
 | `--elimits` | Binding energy limits for dispersion slices (2 values). | `-3.0 1.0` |
 | `--miller_surf` | Miller index for surface slab generation (3 values). | `0 0 1` |
 
@@ -63,6 +67,21 @@ Set the execution mode using the `--mode` flag.
 ```bash
 python arpes.py --mode single --mock --normal 0.0 0.0 1.0 --energy -0.5
 ```
+
+**Shift the Fermi level by +0.3 eV (rigid-band / doping emulation):**
+```bash
+python arpes.py --mode single --mock --normal 0.0 0.0 1.0 --efermi_shift 0.3
+```
+
+**Weight intensities by d-orbital character (matrix-element proxy):**
+```bash
+python arpes.py --mode single --input vasprun.xml --orbital_weights "d:1"
+```
+
+Large `vasprun.xml` files (>100 MB) are parsed with a constant-memory streaming
+parser, and parse results are cached to `<input>.arpes_cache.npz` for instant
+re-runs. Orbital projections are reduced to per-state weights during the parse,
+so the full projection tensor is never held in memory.
 
 **Generate multi-plane projections from a VASP HDF5 file:**
 ```bash

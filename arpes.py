@@ -77,10 +77,25 @@ def generate_mock_electronic_structure() -> dict:
             "is_spin_polarized": False
             }
 
+def build_weights_spec(args):
+    """Translates the matrix-element CLI flags into a parser weights_spec (or None)."""
+    if not (args.matrix_elements or args.orbital_weights or args.ion_weights):
+        return None
+    orbital_weights = None
+    if args.orbital_weights:
+        orbital_weights = {}
+        for part in args.orbital_weights.split(","):
+            name, _, value = part.partition(":")
+            orbital_weights[name.strip()] = float(value)
+    ion_weights = None
+    if args.ion_weights:
+        ion_weights = [float(x) for x in args.ion_weights.split(",")]
+    return {"orbital_weights": orbital_weights, "ion_weights": ion_weights}
+
 def execute_projection(projector, efermi, args, normal_frac, plane_label):
     """Helper method to interpolate and plot projection slices."""
     print(f"\n[Geometry] Interpolating onto plane (Normal: {normal_frac})...")
-    u_grid, v_grid, interp_spectra = projector.interpolate_plane(
+    u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
             normal_frac=normal_frac,
             point_frac=np.array(args.origin),
             u_range=tuple(args.ubounds),
@@ -89,9 +104,11 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             interpolate_factor=args.smooth
             )
 
-    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi)
+    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi,
+                           efermi_shift=args.efermi_shift, weights=interp_weights)
 
     # 1. Constant Energy Slice
+    miller_str = " ".join(f"{x:g}" for x in normal_frac)
     fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}.png")
     fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_constant_energy_cut(
@@ -102,7 +119,7 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
 
     # 2. Band Dispersion Slice
     disp_file = os.path.join(args.outdir, f"dispersion_{plane_label}.png")
-    disp_title = f"Dispersion Slice\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
+    disp_title = f"Bands projected onto ({miller_str})"
     plotter.plot_dispersion_slice(
             slice_coordinate=args.slice_coord, along_v=args.along_v,
             energy_limits=tuple(args.elimits), n_energy_points=args.n_energy,
@@ -110,6 +127,20 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             filename=disp_file, cscale=args.cscale, custom_title=disp_title
             )
     print(f" -> Saved dispersion slice: {disp_file}")
+
+# Worker context for multi-plane parallelism: populated in the parent before the
+# fork so children inherit the projector (and its cached Delaunay triangulation)
+# copy-on-write instead of pickling it through the task queue.
+_MULTI_CTX = {}
+
+def _multi_plane_worker(task):
+    """Executes one plane projection inside a forked worker process."""
+    import matplotlib
+    matplotlib.use("Agg", force=True)  # never touch a GUI backend in a worker
+    h, k, l, plane_name = task
+    execute_projection(_MULTI_CTX["projector"], _MULTI_CTX["efermi"],
+                       _MULTI_CTX["args"], np.array([h, k, l]), plane_name)
+    return plane_name
 
 def make_bar_label(lbl: str) -> str:
     """Formats standard labels into LaTeX overbar notation for Surface BZ."""
@@ -133,6 +164,7 @@ def main():
     # ---------------------------------------------------------
     data = None
     input_resolved = None
+    weights_spec = build_weights_spec(args)
 
     if args.mock:
         print("[I/O] Initializing synthetic simple-cubic tight-binding dataset...")
@@ -144,7 +176,7 @@ def main():
             if candidate and os.path.exists(candidate):
                 print(f"[I/O] Resolving calculation database: {candidate}")
                 parser_inst = VaspDataParser(candidate)
-                data = parser_inst.parse()
+                data = parser_inst.parse(weights_spec=weights_spec)
                 input_resolved = candidate
                 break
 
@@ -152,11 +184,16 @@ def main():
             print("[Warning] No VASP files found. Falling back to synthetic dataset.")
             data = generate_mock_electronic_structure()
 
+    if weights_spec is not None and data.get("weights") is None:
+        print("[Warning] Matrix-element weighting requested but no projections are "
+              "available (mock data); proceeding with uniform weights.")
+
     # ---------------------------------------------------------
     # 2. Execute Selected Mode
     # ---------------------------------------------------------
     if args.mode in ["single", "multi"]:
-        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"])
+        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"],
+                                    weights=data.get("weights"))
 
         if args.mode == "single":
             # Single Plane Execution
@@ -172,10 +209,26 @@ def main():
                     (1.0, 1.0, 1.0), (2.0, 1.0, 0.0), (1.0, 2.0, 0.0),
                     (1.0, 1.0, 2.0), (2.0, 0.0, 1.0), (1.0, 2.0, 1.0)
                     ]
-            for h, k, l in miller_indices:
-                normal_frac = np.array([h, k, l])
-                plane_name = f"{int(h)}{int(k)}{int(l)}"
-                execute_projection(projector, data["efermi"], args, normal_frac, plane_name)
+            tasks = [(h, k, l, f"{int(h)}{int(k)}{int(l)}") for h, k, l in miller_indices]
+
+            # Build the shared triangulation once in the parent so every forked
+            # worker inherits it copy-on-write instead of recomputing it.
+            projector.build_interpolator()
+            _MULTI_CTX.update(projector=projector, efermi=data["efermi"], args=args)
+
+            import multiprocessing
+            if hasattr(os, "fork"):
+                n_workers = min(len(tasks), os.cpu_count() or 1)
+                print(f"[Multi] Processing {len(tasks)} planes on {n_workers} parallel workers...")
+                ctx = multiprocessing.get_context("fork")
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+                    for plane_name in pool.map(_multi_plane_worker, tasks):
+                        print(f"[Multi] Plane {plane_name} complete.")
+            else:
+                # Platforms without fork (e.g. Windows) fall back to sequential execution
+                for task in tasks:
+                    _multi_plane_worker(task)
 
     elif args.mode == "surface_bz":
         # Surface Brillouin Zone Correlation Mode
@@ -205,7 +258,8 @@ def main():
         analyzer = SurfaceBZAnalyzer(input_resolved)
         analyzer.generate_slab(tuple(args.miller_surf), args.slab_min, args.vac_min)
         corr = analyzer.correlate_zones()
-        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"])
+        projector = KSpaceProjector(data["kpoints"], data["eigenvalues"], data["rec_lattice"],
+                                    weights=data.get("weights"))
 
         # Filter out unique points using dictionary keys
         unique_pts = {tuple(np.round(kpt, 4)): {'coord': kpt, 'label': make_bar_label(lbl), 'raw': lbl}
@@ -215,12 +269,12 @@ def main():
         gamma_pt = unique_pts.pop(gamma_key)
 
         for pt_info in unique_pts.values():
+            print(f" -> Running high-symmetry point {pt_info['label']} for band projection.")
 #            if 'Z' in pt_info['label'][1:-1] or ('X' in pt_info['label'][1:-1] and '1' not in pt_info['label'][1:-1]):
-            if True:
-                print(f" -> Running high-symmetry point {pt_info['label']} for band projection.")
-            else:
-                print(f" -> Skipping high-symmetry point {pt_info['label']} for band projection.")
-                continue
+#                pass
+#            else:
+#                continue
+
             p_vec = pt_info['coord']
             dist = np.linalg.norm(p_vec)
             if dist < 1e-4: continue
@@ -236,16 +290,17 @@ def main():
 
             print(f" -> Path: -{pt_info['raw']} -> Gamma -> +{pt_info['raw']}")
 
-            u_grid, v_grid, interp_spectra = projector.interpolate_plane(
+            u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
                 normal_frac=normal_frac, point_frac=np.array([0.0, 0.0, 0.0]),
                 u_range=(-dist, dist), v_range=(-3.0, 3.0),
                 grid_resolution=args.resolution, interpolate_factor=args.smooth, u_dir_cart=u_dir_cart
             )
 
-            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"])
+            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"],
+                                   efermi_shift=args.efermi_shift, weights=interp_weights)
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
-            bands_title = f"Surface Bands {tuple(args.miller_surf)}"
+            bands_title = f"Bands projected onto ({' '.join(str(m) for m in args.miller_surf)})"
             plotter.plot_dispersion_slice(
                 slice_coordinate=0.0, along_v=False, energy_limits=tuple(args.elimits),
                 n_energy_points=args.n_energy, broadening=args.broadening, cmap=args.cmap,

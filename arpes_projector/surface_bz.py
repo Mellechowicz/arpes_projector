@@ -8,10 +8,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.spatial import Voronoi
-from sklearn.cluster import DBSCAN
-from pymatgen.io.vasp.outputs import Vasprun, Vaspout
-from pymatgen.core.surface import SlabGenerator
-from pymatgen.symmetry.bandstructure import HighSymmKpath
 
 class SurfaceBZAnalyzer:
     def __init__(self, filepath):
@@ -20,6 +16,8 @@ class SurfaceBZAnalyzer:
         self.bulk_structure = self._parse_structure()
 
     def _parse_structure(self):
+        # Deferred import: pymatgen is only needed for the surface BZ modes
+        from pymatgen.io.vasp.outputs import Vasprun, Vaspout
         if self.filepath.endswith(".h5"):
             return Vaspout(self.filepath).final_structure
         return Vasprun(self.filepath).final_structure
@@ -84,6 +82,11 @@ class SurfaceBZAnalyzer:
 
         region_idx = vor.point_region[origin_idx]
         region_vertices_indices = vor.regions[region_idx]
+        if -1 in region_vertices_indices:
+            raise RuntimeError(
+                    "Central Voronoi region is unbounded; the surface node grid is too small "
+                    "to close the 2D Wigner-Seitz cell. Increase the translation range."
+                    )
         vertices = vor.vertices[region_vertices_indices]
 
         # Sort counter-clockwise to form a closed polygon
@@ -99,6 +102,8 @@ class SurfaceBZAnalyzer:
 
     def correlate_zones(self):
         """Maps 3D paths to 2D projections and identifies band foldings."""
+        from pymatgen.symmetry.bandstructure import HighSymmKpath
+        from sklearn.cluster import DBSCAN
         bulk_kpath = HighSymmKpath(self.bulk_structure)
         bulk_kpts = bulk_kpath.kpath["kpoints"]
 

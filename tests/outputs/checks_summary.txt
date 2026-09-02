@@ -1,7 +1,0 @@
-C1 streaming parse of real vasprun.xml (ground truth)      PASS    1.03s  E_F=7.4356 eV, 160 bands x 1000 kpts
-C2 parse cache: round-trip, spec keying, staleness         PASS    2.54s  cache hit 8 ms
-C3 weight reduction vs raw-text ground truth               PASS    4.31s  w_s[0,0,0]=0.9671 (expect 0.9671), total in [0.15,1.08]
-C4 interpolation: weights ride the shared triangulation faithfully PASS    0.11s  max dev vs standalone interpolation: 0.0e+00
-C5 plotter numerics: unit weights ≡ unweighted; E_F-shift consistency PASS    0.08s  unit-weight identity, shift equivalence, band-removal linearity
-C6 dispersion slices agree with manual Lorentzian sums     PASS    0.08s  integrate_v max dev: 6.7e-16
-C7 CLI end-to-end (exemplary plots saved to tests/outputs) PASS    4.80s  mock (2 plots), real_unweighted (2 plots), real_d_weighted (2 plots)

@@ -23,9 +23,6 @@ Approach and Modules:
  - Styling: Publication formatting via sumo.plotting.formatting.
 """
 
-import os
-from concurrent.futures import ThreadPoolExecutor
-
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Tuple, Optional
@@ -41,8 +38,7 @@ except ImportError:
 class ARPESPlotter:
     """Simulates physical photoemission intensities and generates publication-ready plots."""
 
-    def __init__(self, u_grid: np.ndarray, v_grid: np.ndarray, interpolated_spectra: np.ndarray, efermi: float,
-                 efermi_shift: float = 0.0, weights: np.ndarray = None):
+    def __init__(self, u_grid: np.ndarray, v_grid: np.ndarray, interpolated_spectra: np.ndarray, efermi: float):
         """
         Initialize the plotter.
 
@@ -51,25 +47,10 @@ class ARPESPlotter:
             v_grid (np.ndarray): Local in-plane coordinate axis v, shape (grid_res,).
             interpolated_spectra (np.ndarray): Interpolated energies, shape (nspin, nband, grid_res, grid_res).
             efermi (float): Fermi energy in eV.
-            efermi_shift (float): Rigid shift (eV) added to the Fermi level. A positive value
-                raises the chemical potential (electron doping), moving the simulated Fermi
-                surface. All energies are referenced to the shifted level (E - (E_F + shift)).
-            weights (np.ndarray, optional): Per-state spectral weights (matrix-element
-                proxies), same shape as interpolated_spectra. Each band's Lorentzian is
-                scaled by its weight; None weights every state equally.
         """
-        if efermi is None:
-            raise ValueError("Fermi energy is None; cannot reference band energies. "
-                             "Provide a valid VASP file or set the Fermi level explicitly.")
-        if weights is not None and weights.shape != interpolated_spectra.shape:
-            raise ValueError(f"weights shape {weights.shape} does not match "
-                             f"spectra shape {interpolated_spectra.shape}.")
         self.u_grid = u_grid
         self.v_grid = v_grid
-        self.efermi_shift = efermi_shift
-        # Reference all energies to the (optionally shifted) Fermi level, mapping E_F + shift -> 0.0 eV
-        self.spectra = interpolated_spectra - efermi - efermi_shift
-        self.weights = weights
+        self.spectra = interpolated_spectra - efermi  # Shift Fermi level to 0.0 eV
         self.efermi = 0.0
         self._apply_styles()
 
@@ -92,61 +73,6 @@ class ARPESPlotter:
                 'axes.titlesize': 14
                 })
 
-    @staticmethod
-    def _accumulate_lorentzian(band_values: np.ndarray, energy_array: np.ndarray, broadening: float,
-                               weights: np.ndarray = None) -> np.ndarray:
-        """
-        Vectorized Lorentzian accumulation over bands, threaded over energies.
-
-        Args:
-            band_values (np.ndarray): Band energies with the band axis first, shape (nbands, ...).
-            energy_array (np.ndarray): Energies (relative to Ef) at which to evaluate intensity.
-            broadening (float): Lorentzian HWHM in eV.
-            weights (np.ndarray, optional): Per-state weights, same shape as band_values;
-                each state's Lorentzian is scaled by its weight.
-
-        Returns:
-            np.ndarray: Accumulated intensity, shape (n_energies, ...).
-        """
-        # NaN band values (grid points outside the k-point hull) are mapped to +inf,
-        # whose Lorentzian weight is exactly 0 - equivalent to the previous
-        # nan_to_num(...) of each Lorentzian, without per-energy NaN scans.
-        bands = np.where(np.isnan(band_values), np.inf, band_values)
-        if weights is not None:
-            weights = np.nan_to_num(weights, nan=0.0)
-        nbands = bands.shape[0]
-        cell = bands[0].size if nbands else 0
-        prefactor = broadening / np.pi
-
-        n_energies = len(energy_array)
-        intensity = np.zeros((n_energies,) + bands.shape[1:])
-        if nbands == 0 or cell == 0:
-            return intensity
-
-        # Chunk the band axis so the largest temporary stays around ~40 MB
-        band_chunk = max(1, int(5e6) // cell)
-
-        def _one_energy(idx: int):
-            acc = intensity[idx]
-            e = energy_array[idx]
-            for b0 in range(0, nbands, band_chunk):
-                block = bands[b0:b0 + band_chunk]
-                lor = prefactor / ((e - block) ** 2 + broadening ** 2)
-                if weights is not None:
-                    lor *= weights[b0:b0 + band_chunk]
-                acc += lor.sum(axis=0)
-
-        # numpy releases the GIL on large ufuncs, so threads parallelize well here
-        n_workers = min(n_energies, os.cpu_count() or 1)
-        if n_workers > 1 and n_energies * nbands * cell > 1_000_000:
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                list(pool.map(_one_energy, range(n_energies)))
-        else:
-            for idx in range(n_energies):
-                _one_energy(idx)
-
-        return intensity
-
     def calculate_spectral_density(self, energy_array: np.ndarray, broadening: float = 0.05, spin_channel: int = 0) -> np.ndarray:
         """
         Evaluates the Lorentzian spectral function representing intrinsic lifetime broadening.
@@ -159,8 +85,23 @@ class ARPESPlotter:
         Returns:
             np.ndarray: Calculated spectral density array, shape (n_energies, grid_res_v, grid_res_u).
         """
-        w = self.weights[spin_channel] if self.weights is not None else None
-        return self._accumulate_lorentzian(self.spectra[spin_channel], np.asarray(energy_array), broadening, w)
+        grid_res_v = len(self.v_grid)
+        grid_res_u = len(self.u_grid)
+        n_energies = len(energy_array)
+
+        intensity = np.zeros((n_energies, grid_res_v, grid_res_u))
+        nbands = self.spectra.shape[1]  # Extracted correct dimension count for bands
+
+        # Accumulate Lorentzian line-shapes for each band
+        for b in range(nbands):
+            band_energies = self.spectra[spin_channel, b]
+            if np.isnan(band_energies).all():
+                continue
+            for idx, e in enumerate(energy_array):
+                lorentzian = (1.0 / np.pi) * (broadening / ((e - band_energies) ** 2 + broadening ** 2))
+                intensity[idx] += np.nan_to_num(lorentzian, nan=0.0)
+
+        return intensity
 
     def plot_constant_energy_cut(self, energy: float, broadening: float = 0.05,
                                  spin_channel: int = 0, cmap: str = "inferno",
@@ -182,7 +123,7 @@ class ARPESPlotter:
 
         fig, ax = plt.subplots(figsize=(6, 5))
         im = ax.pcolormesh(self.u_grid, self.v_grid, intensity[0], cmap=cmap, shading='auto', norm=norm)
-        fig.colorbar(im, ax=ax, label="Simulated Intensity (a.u.)")
+        fig.colorbar(im, ax=ax, label=f"Simulated ARPES Intensity ({cscale})")
 
         ax.set_xlabel(r"$k_u$ ($\mathrm{\AA}^{-1}$)")
         ax.set_ylabel(r"$k_v$ ($\mathrm{\AA}^{-1}$)")
@@ -217,12 +158,15 @@ class ARPESPlotter:
             filename (Optional[str]): Output filename.
         """
         energy_axis = np.linspace(energy_limits[0], energy_limits[1], n_energy_points)
-        w = self.weights[spin_channel] if self.weights is not None else None
+        nbands = self.spectra.shape[1]  # Extracted correct dimension count for bands
 
         if integrate_v and not along_v:
-            # Accumulate over the full plane, then average out the v axis
-            intensity_slice = self._accumulate_lorentzian(
-                    self.spectra[spin_channel], energy_axis, broadening, w).sum(axis=1)
+            intensity_slice = np.zeros((n_energy_points, len(self.u_grid)))
+            for b in range(nbands):
+                band_2d = self.spectra[spin_channel, b]
+                for i, e in enumerate(energy_axis):
+                    lorentzian = (1.0 / np.pi) * (broadening / ((e - band_2d) ** 2 + broadening ** 2))
+                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0).sum(axis=0)
             intensity_slice /= len(self.v_grid)
             k_axis = self.u_grid
             xlabel = r"$k_\parallel$ ($\mathrm{\AA}^{-1}$)"
@@ -231,26 +175,32 @@ class ARPESPlotter:
         elif along_v:
             # Slicing along constant u coordinate
             idx = np.argmin(np.abs(self.u_grid - slice_coordinate))
-            intensity_slice = self._accumulate_lorentzian(
-                    self.spectra[spin_channel, :, :, idx], energy_axis, broadening,
-                    w[:, :, idx] if w is not None else None)
+            intensity_slice = np.zeros((n_energy_points, len(self.v_grid)))
+            for b in range(nbands):
+                band_v = self.spectra[spin_channel, b, :, idx]
+                for i, e in enumerate(energy_axis):
+                    lorentzian = (1.0 / np.pi) * (broadening / ((e - band_v) ** 2 + broadening ** 2))
+                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
             k_axis = self.v_grid
             xlabel = r"$k_v$ ($\mathrm{\AA}^{-1}$)"
-            title = rf"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
+            title = f"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
         else:
             # Slicing along constant v coordinate
             idx = np.argmin(np.abs(self.v_grid - slice_coordinate))
-            intensity_slice = self._accumulate_lorentzian(
-                    self.spectra[spin_channel, :, idx, :], energy_axis, broadening,
-                    w[:, idx, :] if w is not None else None)
+            intensity_slice = np.zeros((n_energy_points, len(self.u_grid)))
+            for b in range(nbands):
+                band_u = self.spectra[spin_channel, b, idx, :]
+                for i, e in enumerate(energy_axis):
+                    lorentzian = (1.0 / np.pi) * (broadening / ((e - band_u) ** 2 + broadening ** 2))
+                    intensity_slice[i] += np.nan_to_num(lorentzian, nan=0.0)
             k_axis = self.u_grid
             xlabel = r"$k_u$ ($\mathrm{\AA}^{-1}$)"
-            title = rf"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
+            title = f"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
 
         norm = LogNorm(vmin=max(intensity_slice.min(), 1e-5), vmax=intensity_slice.max()) if cscale == "log" else (PowerNorm(0.5) if cscale == "sqrt" else None)
         fig, ax = plt.subplots(figsize=(6, 5))
         im = ax.pcolormesh(k_axis, energy_axis, intensity_slice, cmap=cmap, shading='auto', norm=norm)
-        fig.colorbar(im, ax=ax, label="Simulated Intensity (a.u.)")
+        fig.colorbar(im, ax=ax, label=f"Simulated ARPES Intensity ({cscale})")
 
         ax.axhline(0.0, color="w", linestyle="--", alpha=0.6, label="Fermi Level")
         ax.set_xlabel(xlabel)

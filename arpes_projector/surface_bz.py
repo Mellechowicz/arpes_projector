@@ -30,8 +30,13 @@ class SurfaceBZAnalyzer:
         v = v / np.linalg.norm(v)
         z = np.array([0.0, 0.0, 1.0])
 
-        if np.allclose(v, z): return np.eye(3)
-        if np.allclose(v, -z): return -np.eye(3)
+        if np.allclose(v, z):
+            return np.eye(3)
+        if np.allclose(v, -z):
+            # -I has det = -1: it is a point inversion, not a rotation, and would
+            # mirror the whole surface BZ. Use a proper 180 deg rotation about x,
+            # which also maps -z to +z but preserves handedness (det = +1).
+            return np.diag([1.0, -1.0, -1.0])
 
         axis = np.cross(v, z)
         axis = axis / np.linalg.norm(axis)
@@ -43,8 +48,31 @@ class SurfaceBZAnalyzer:
         return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
 
     def generate_slab(self, miller_index, min_slab, min_vac):
-        """Prepares the aligned Cartesian coordinate frames based on the Miller surface."""
+        """
+        Builds the (hkl) slab and the aligned Cartesian frames for its surface BZ.
+
+        min_slab / min_vac size the real-space slab used for surface-state work.
+        They deliberately do NOT enter the surface Brillouin zone below: the
+        projected BZ of an (hkl) surface is fixed by the 2D surface lattice,
+        which the Miller index alone determines - slab thickness and vacuum
+        change the real-space cell, not the in-plane reciprocal periodicity.
+        Previously these two arguments were accepted and silently ignored, so
+        the slab is now actually constructed and kept as self.slab.
+        """
         self.miller_index = miller_index
+        self.min_slab, self.min_vac = min_slab, min_vac
+        try:
+            from pymatgen.core.surface import SlabGenerator
+            self.slab = SlabGenerator(self.bulk_structure, miller_index,
+                                      min_slab_size=min_slab,
+                                      min_vacuum_size=min_vac).get_slab()
+            print(f"[Surface BZ] Slab {tuple(miller_index)}: {len(self.slab)} sites, "
+                  f"c = {self.slab.lattice.c:.2f} A "
+                  f"(min slab {min_slab} A, min vacuum {min_vac} A)")
+        except Exception as exc:
+            self.slab = None
+            print(f"[Surface BZ] Warning: could not build the {tuple(miller_index)} slab "
+                  f"({type(exc).__name__}: {exc}); continuing with the projected bulk BZ.")
 
         # 1. Base bulk reciprocal lattice
         self.bulk_recip = self.bulk_structure.lattice.reciprocal_lattice.matrix
@@ -131,8 +159,16 @@ class SurfaceBZAnalyzer:
         self.correlation_data["clusters"] = clustering.labels_
         return self.correlation_data
 
-    def visualize(self):
-        """Renders the Brillouin Zones with physically accurate vertical projection lines."""
+    def visualize(self, filename=None):
+        """
+        Renders the Brillouin zones.
+
+        Args:
+            filename (str, optional): if given, the figure is written there.
+                Without it the figure is shown interactively - which silently
+                produces nothing under a headless/Agg backend, so batch callers
+                should always pass a filename.
+        """
         fig = plt.figure(figsize=(14, 6))
 
         # ==========================================
@@ -197,5 +233,9 @@ class SurfaceBZAnalyzer:
         ax2.set_aspect('equal')
 
         plt.tight_layout()
-        plt.show()
+        if filename:
+            plt.savefig(filename, dpi=300)
+            plt.close(fig)
+        else:
+            plt.show()
 

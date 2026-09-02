@@ -226,7 +226,10 @@ def main():
 
         correlation_data = analyzer.correlate_zones()
         print(" -> Correlation Mapping Computed:", correlation_data.get("labels", "N/A"))
-        analyzer.visualize()
+        bz_file = os.path.join(args.outdir,
+                               f"surface_bz_{''.join(str(m) for m in args.miller_surf)}.png")
+        analyzer.visualize(filename=bz_file)
+        print(f" -> Saved surface Brillouin zone: {bz_file}")
 
     elif args.mode == "surface_bands":
         if input_resolved is None:

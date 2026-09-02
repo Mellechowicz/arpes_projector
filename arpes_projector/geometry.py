@@ -27,6 +27,7 @@ Approach and Modules:
 
 import numpy as np
 from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import Delaunay
 from typing import Tuple
 
 class KSpaceProjector:
@@ -51,6 +52,20 @@ class KSpaceProjector:
         self.rec_lattice = rec_lattice
         # Transform fractional k-points to Cartesian coordinates (A^-1)
         self.kpoints_cart = np.dot(kpoints, rec_lattice)
+        # Lazily-built triangulation shared by every band, spin and weight column
+        self._triangulation = None
+
+    def build_triangulation(self) -> Delaunay:
+        """
+        Builds (once) and returns the Delaunay triangulation of the k-point cloud.
+
+        Holding it explicitly lets every interpolated quantity reuse one
+        triangulation - and, more importantly, one qhull point-location
+        structure - instead of rebuilding both per band.
+        """
+        if self._triangulation is None:
+            self._triangulation = Delaunay(self.kpoints_cart)
+        return self._triangulation
 
     def define_plane_basis(self, normal_frac: np.ndarray, point_frac: np.ndarray, u_dir_cart: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -115,27 +130,35 @@ class KSpaceProjector:
                      + vv[:, :, None] * v_hat[None, None, :])
         grid_cart_flat = grid_cart.reshape(-1, 3)
 
-        nspins, nbands, _ = self.eigenvalues.shape
-        interpolated_spectra = np.zeros((nspins, nbands, total_resolution, total_resolution))
-        interpolated_weights = (None if self.weights is None else
-                                np.zeros((nspins, nbands, total_resolution, total_resolution)))
+        nspins, nbands, nkpts = self.eigenvalues.shape
+        n_eig = nspins * nbands
 
-        # Perform Linear Triangulation-based 3D interpolation for each band and spin channel.
-        # Matrix-element weights ride along as a second value column so the expensive
-        # simplex lookup for each query point is paid once for both quantities.
-        for s in range(nspins):
-            for b in range(nbands):
-                if self.weights is None:
-                    values = self.eigenvalues[s, b, :]
-                else:
-                    values = np.column_stack([self.eigenvalues[s, b, :], self.weights[s, b, :]])
-                interp = LinearNDInterpolator(self.kpoints_cart, values)
-                flat_interp = interp(grid_cart_flat)
-                if self.weights is None:
-                    interpolated_spectra[s, b] = flat_interp.reshape(total_resolution, total_resolution)
-                else:
-                    interpolated_spectra[s, b] = flat_interp[:, 0].reshape(total_resolution, total_resolution)
-                    interpolated_weights[s, b] = flat_interp[:, 1].reshape(total_resolution, total_resolution)
+        # One triangulation, one interpolator, one pass. Building a fresh
+        # LinearNDInterpolator per band re-ran qhull nspins*nbands times per
+        # plane; on a real VASP k-mesh - a regular grid, whose degenerate sliver
+        # simplices make point-location pathologically slow - that dominated the
+        # entire runtime. Bands and matrix-element weights become value columns
+        # so each query point's simplex is located exactly once.
+        values = self.eigenvalues.reshape(n_eig, nkpts).T
+        if self.weights is not None:
+            values = np.hstack([values, self.weights.reshape(n_eig, nkpts).T])
+        interp = LinearNDInterpolator(self.build_triangulation(), values)
+
+        # Chunk over grid points so the temporary stays bounded regardless of
+        # resolution and band count.
+        n_pixels = grid_cart_flat.shape[0]
+        n_cols = values.shape[1]
+        chunk = max(1, int(4e7) // max(1, n_cols))
+        flat = np.empty((n_pixels, n_cols))
+        for i0 in range(0, n_pixels, chunk):
+            flat[i0:i0 + chunk] = interp(grid_cart_flat[i0:i0 + chunk])
+
+        interpolated_spectra = np.ascontiguousarray(
+                flat[:, :n_eig].T.reshape(nspins, nbands, total_resolution, total_resolution))
+        interpolated_weights = None
+        if self.weights is not None:
+            interpolated_weights = np.ascontiguousarray(
+                    flat[:, n_eig:].T.reshape(nspins, nbands, total_resolution, total_resolution))
 
         return u_grid, v_grid, interpolated_spectra, interpolated_weights
 

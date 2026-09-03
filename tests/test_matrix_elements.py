@@ -128,5 +128,107 @@ else:
           h4.min() < 0 and h_t.min() >= -1e-3,
           f"4 sets [{h4.min():.3f},{h4.max():.3f}], 1 set [{h_t.min():.3f},{h_t.max():.3f}]")
 
+# ---------------------------------------------------------------- regressions
+# Guards for defects fixed after the initial matrix-element work. Each asserts
+# the property the fix restored, not merely that the code runs.
+
+# 1. One shared triangulation must give exactly what per-band interpolators gave.
+from scipy.interpolate import LinearNDInterpolator
+_rs = np.random.RandomState(0)
+_rec = np.array([[1.3607, -0.3693, 0.], [1.3607, 0.3693, 0.], [0., 0., 1.4235]])
+_lin = np.linspace(-.45, .45, 7)
+_X, _Y, _Z = np.meshgrid(_lin, _lin, _lin, indexing="ij")
+_kp = np.stack([_X.ravel(), _Y.ravel(), _Z.ravel()], 1)
+_nb = 4
+_eig = _rs.rand(1, _nb, len(_kp)) * 4 - 2
+_wts = _rs.rand(1, _nb, len(_kp)) + 0.1
+for _tag, _W in (("without weights", None), ("with weights", _wts)):
+    _pr = KSpaceProjector(_kp, _eig, _rec, weights=_W)
+    _u, _v, _s_new, _w_new = _pr.interpolate_plane(
+            np.array([0., 0, 1]), np.zeros(3), (-0.8, 0.8), (-0.8, 0.8), 21, 1)
+    _n, _p, _uh, _vh = _pr.define_plane_basis(np.array([0., 0, 1]), np.zeros(3))
+    _uu, _vv = np.meshgrid(_u, _v)
+    _pts = (_p + _uu[..., None] * _uh + _vv[..., None] * _vh).reshape(-1, 3)
+    _kc = _kp @ _rec
+    _s_ref = np.zeros_like(_s_new)
+    for _b in range(_nb):
+        _s_ref[0, _b] = LinearNDInterpolator(_kc, _eig[0, _b])(_pts).reshape(21, 21)
+    check(f"shared triangulation matches per-band interpolation ({_tag})",
+          np.array_equal(np.isnan(_s_new), np.isnan(_s_ref))
+          and np.nanmax(np.abs(_s_new - _s_ref)) == 0.0,
+          f"max|diff| {np.nanmax(np.abs(_s_new - _s_ref)):.1e}")
+
+# 2. align_vector_to_z must return a proper rotation; -I would mirror the BZ.
+try:
+    from arpes_projector.surface_bz import SurfaceBZAnalyzer
+    _an = SurfaceBZAnalyzer.__new__(SurfaceBZAnalyzer)
+    _z = np.array([0., 0, 1])
+    _R = _an.align_vector_to_z(-_z)
+    _x, _y = np.array([1., 0, 0]), np.array([0, 1., 0])
+    check("align_vector_to_z(-z) is a rotation, not a reflection",
+          abs(np.linalg.det(_R) - 1.0) < 1e-12, f"det = {np.linalg.det(_R):+.1f}")
+    check("align_vector_to_z(-z) maps -z to +z and preserves handedness",
+          np.allclose(_R @ (-_z), _z)
+          and np.allclose(_R @ np.cross(_x, _y), np.cross(_R @ _x, _R @ _y)))
+    check("align_vector_to_z stays proper for general directions",
+          all(abs(np.linalg.det(_an.align_vector_to_z(np.array(_v, float))) - 1) < 1e-9
+              for _v in ([0, 0, 1], [1, 1, 1], [0, 0, -1], [1e-7, 0, -1])))
+except ImportError as _exc:
+    print(f"[SKIP] surface_bz checks ({_exc})")
+
+# 3. Degenerate inputs must fail loudly instead of writing a convincing blank figure.
+from arpes_projector.cli import build_parser
+_parser = build_parser()
+for _args, _label in ((["--broadening", "0"], "--broadening 0"),
+                      (["--broadening", "-0.1"], "--broadening negative"),
+                      (["--resolution", "0"], "--resolution 0"),
+                      (["--smooth", "0"], "--smooth 0"),
+                      (["--n_energy", "0"], "--n_energy 0")):
+    try:
+        _parser.parse_args(_args)
+        _rejected = False
+    except SystemExit:
+        _rejected = True
+    check(f"{_label} is rejected at parse time", _rejected)
+try:
+    KSpaceProjector(_kp, _eig, _rec).define_plane_basis(np.zeros(3), np.zeros(3))
+    _raised = False
+except ValueError:
+    _raised = True
+check("--normal 0 0 0 raises instead of producing a NaN plane", _raised)
+
+# 4. integrate_v must divide by contributing samples, not by grid height. A flat
+#    band viewed along (111) has varying hull coverage, so the old normalisation
+#    imprinted a purely geometric gradient.
+import matplotlib.pyplot as _plt
+_flat = np.zeros((1, 1, len(_kp)))
+_pr = KSpaceProjector(_kp, _flat, np.eye(3) * 2.0)
+_u, _v, _s, _ = _pr.interpolate_plane(np.array([1., 1, 1]), np.zeros(3),
+                                      (-1.6, 1.6), (-1.6, 1.6), 41, 1)
+_captured = {}
+_orig = _plt.Axes.pcolormesh
+def _spy(self, *a, **k):
+    # The colorbar draws its own pcolormesh afterwards; keep only the first.
+    if "C" not in _captured and len(a) >= 3:
+        _captured["C"] = np.asarray(a[2])
+    return _orig(self, *a, **k)
+_plt.Axes.pcolormesh = _spy
+try:
+    ARPESPlotter(_u, _v, _s, 0.0).plot_dispersion_slice(
+            0.0, integrate_v=True, energy_limits=(-0.3, 0.3), n_energy_points=7,
+            filename=os.path.join(REPO, "tests", "_tmp_integrate_v.png"))
+finally:
+    _plt.Axes.pcolormesh = _orig
+    _tmp = os.path.join(REPO, "tests", "_tmp_integrate_v.png")
+    if os.path.exists(_tmp):
+        os.remove(_tmp)
+_cov = np.isfinite(_s[0]).any(axis=0).sum(axis=0)
+_row = _captured["C"][3][_cov > 0]
+_spread = (_row.max() - _row.min()) / max(_row.mean(), 1e-30)
+check("integrate_v is flat for a flat band despite varying hull coverage",
+      _spread < 1e-9,
+      f"coverage {_cov[_cov>0].min()}..{_cov.max()} of {len(_v)}, relative spread {_spread:.1e}")
+
+
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))
 sys.exit(1 if FAIL else 0)

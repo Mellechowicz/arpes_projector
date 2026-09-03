@@ -5,6 +5,25 @@ Handles argument parsing to expose geometry, plotting, and file settings.
 
 import argparse
 
+
+def _positive_float(text):
+    """argparse type for a strictly positive float."""
+    value = float(text)
+    if not value > 0.0:
+        raise argparse.ArgumentTypeError(
+                f"must be strictly positive, got {value}. A broadening of 0 makes the "
+                "Lorentzian numerator zero, blanking the whole spectrum; a negative one "
+                "produces negative spectral weight.")
+    return value
+
+
+def _positive_int(text):
+    """argparse type for a strictly positive int."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
 def build_parser() -> argparse.ArgumentParser:
     """
     Constructs and returns the argument parser for ARPES projections.
@@ -32,13 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
     geom_group.add_argument("--origin", nargs=3, type=float, default=[0.0, 0.0, 0.0], help="Fractional point the projection plane passes through.")
     geom_group.add_argument("--ubounds", nargs=2, type=float, default=[-2.0, 2.0], help="Coordinate limits of the projection plane u-axis (A^-1).")
     geom_group.add_argument("--vbounds", nargs=2, type=float, default=[-2.0, 2.0], help="Coordinate limits of the projection plane v-axis (A^-1).")
-    geom_group.add_argument("--resolution", type=int, default=250, help="Grid resolution for the 2D projection plane.")
-    geom_group.add_argument("--smooth", type=int, default=2, help="Sumo-style interpolation smoothing multiplier.")
+    geom_group.add_argument("--resolution", type=_positive_int, default=250, help="Grid resolution for the 2D projection plane.")
+    geom_group.add_argument("--smooth", type=_positive_int, default=2, help="Sumo-style interpolation smoothing multiplier.")
 
     # Plotting & Physics arguments
     plot_group = parser.add_argument_group("Plotting & Physical Parameters")
     plot_group.add_argument("--energy", type=float, default=0.0, help="Target energy relative to Fermi Level (eV) for constant energy cuts.")
-    plot_group.add_argument("--broadening", type=float, default=0.05, help="Lorentzian broadening (eV) to simulate lifetime effects.")
+    plot_group.add_argument("--broadening", type=_positive_float, default=0.05, help="Lorentzian broadening (eV) to simulate lifetime effects.")
     plot_group.add_argument("--cmap", type=str, default="magma", help="Matplotlib colormap to use for simulated intensity.")
     plot_group.add_argument("--cscale", type=str, choices=["linear", "log", "sqrt"], default="linear", help="Colorbar scaling for ARPES intensity.")
 
@@ -56,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     disp_group.add_argument("--elimits", nargs=2, type=float, default=[-3.0, 1.0], help="Binding energy limits (E - Ef) in eV for dispersion slices.")
     disp_group.add_argument("--slice_coord", type=float, default=0.0, help="Constant coordinate value (A^-1) at which to take the dispersion slice.")
     disp_group.add_argument("--along_v", action="store_true", help="Vary along v-axis instead of u-axis for dispersion slice.")
-    disp_group.add_argument("--n_energy", type=int, default=600, help="Energy grid resolution for dispersion map.")
+    disp_group.add_argument("--n_energy", type=_positive_int, default=600, help="Energy grid resolution for dispersion map.")
 
     # Surface BZ specific
     bz_group = parser.add_argument_group("Surface BZ Options")

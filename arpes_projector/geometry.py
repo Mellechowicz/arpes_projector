@@ -82,7 +82,14 @@ class KSpaceProjector:
         n_cart = np.dot(normal_frac, self.rec_lattice)
         p_cart = np.dot(point_frac, self.rec_lattice)
 
-        n_hat = n_cart / np.linalg.norm(n_cart)
+        # A zero (or unnormalisable) normal would make n_hat NaN, propagate NaN
+        # through the whole grid and yield a uniform blank figure with exit 0.
+        n_norm = np.linalg.norm(n_cart)
+        if not np.isfinite(n_norm) or n_norm < 1e-12:
+            raise ValueError(
+                    f"the plane normal {np.asarray(normal_frac).tolist()} maps to a "
+                    f"zero-length reciprocal vector; it does not define a plane")
+        n_hat = n_cart / n_norm
 
         # Generate orthogonal vectors on the plane via Gram-Schmidt
         # Use a non-collinear starting vector
@@ -92,7 +99,11 @@ class KSpaceProjector:
             aux_vec = np.array([1.0, 0.0, 0.0]) if np.abs(n_hat[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
             u_cart = aux_vec - np.dot(aux_vec, n_hat) * n_hat
 
-        u_hat = u_cart / np.linalg.norm(u_cart)
+        u_norm = np.linalg.norm(u_cart)
+        if not np.isfinite(u_norm) or u_norm < 1e-12:
+            raise ValueError("the requested in-plane direction is collinear with the "
+                             "plane normal, so no in-plane axis can be built")
+        u_hat = u_cart / u_norm
         v_hat = np.cross(n_hat, u_hat)
 
         return n_hat, p_cart, u_hat, v_hat
@@ -159,6 +170,20 @@ class KSpaceProjector:
         if self.weights is not None:
             interpolated_weights = np.ascontiguousarray(
                     flat[:, n_eig:].T.reshape(nspins, nbands, total_resolution, total_resolution))
+
+        # Points outside the convex hull of the k-point cloud interpolate to NaN
+        # and are later drawn as intensity 0 - indistinguishable from a genuine
+        # absence of spectral weight. Report the coverage rather than let a
+        # mostly-fabricated figure pass as data.
+        nan_fraction = float(np.isnan(interpolated_spectra[0, 0]).mean())
+        if nan_fraction >= 1.0:
+            print("[Geometry] WARNING: the requested plane lies entirely outside the "
+                  "k-point convex hull; the figure will be uniformly blank. Check "
+                  "--normal, --origin, --ubounds and --vbounds.")
+        elif nan_fraction > 0.25:
+            print(f"[Geometry] WARNING: {nan_fraction:.0%} of the plot window lies outside "
+                  f"the k-point convex hull and carries no data; it will render as zero "
+                  f"intensity, which looks identical to zero spectral weight.")
 
         return u_grid, v_grid, interpolated_spectra, interpolated_weights
 

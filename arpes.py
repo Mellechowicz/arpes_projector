@@ -120,7 +120,11 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
     plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi, weights=interp_weights)
 
     # 1. Constant Energy Slice
-    fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}.png")
+    # Encode the parameters that change the picture, otherwise a second run at a
+    # different energy or broadening silently overwrites the first.
+    fs_tag = f"E{args.energy:+.2f}_g{args.broadening:g}_{args.cscale}"
+    disp_tag = f"E{args.elimits[0]:+g}to{args.elimits[1]:+g}_g{args.broadening:g}_{args.cscale}"
+    fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}_{fs_tag}.png")
     fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_constant_energy_cut(
             energy=args.energy, broadening=args.broadening, cmap=args.cmap,
@@ -129,7 +133,7 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
     print(f" -> Saved Fermi surface slice: {fs_file}")
 
     # 2. Band Dispersion Slice
-    disp_file = os.path.join(args.outdir, f"dispersion_{plane_label}.png")
+    disp_file = os.path.join(args.outdir, f"dispersion_{plane_label}_{disp_tag}.png")
     disp_title = f"Dispersion Slice\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_dispersion_slice(
             slice_coordinate=args.slice_coord, along_v=args.along_v,

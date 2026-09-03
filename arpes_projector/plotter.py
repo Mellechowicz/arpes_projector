@@ -178,7 +178,16 @@ class ARPESPlotter:
                     if wb is not None:
                         lorentzian = lorentzian * wb
                     intensity_slice[i] += lorentzian.sum(axis=0)
-            intensity_slice /= len(self.v_grid)
+            # Divide by the number of v samples that actually carry data, not by
+            # the full grid height. Columns only partly inside the k-point convex
+            # hull would otherwise be scaled down in proportion to how much of the
+            # column is missing, imprinting a purely geometric intensity gradient
+            # that looks like physics.
+            valid = np.isfinite(self.spectra[spin_channel]).any(axis=0)   # (nv, nu)
+            counts = valid.sum(axis=0).astype(float)                      # per-u column
+            np.divide(intensity_slice, counts, out=intensity_slice,
+                      where=counts > 0)
+            intensity_slice[:, counts == 0] = 0.0
             k_axis = self.u_grid
             xlabel = r"$k_\parallel$ ($\mathrm{\AA}^{-1}$)"
             title = "Projected Surface Band Structure"

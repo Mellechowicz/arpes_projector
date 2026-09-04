@@ -24,6 +24,14 @@ def _positive_int(text):
         raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
     return value
 
+def _nonnegative_float(text):
+    """argparse type for a float that may be zero but not negative."""
+    value = float(text)
+    if value < 0.0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """
     Constructs and returns the argument parser for ARPES projections.
@@ -60,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     plot_group.add_argument("--broadening", type=_positive_float, default=0.05, help="Lorentzian broadening (eV) to simulate lifetime effects.")
     plot_group.add_argument("--cmap", type=str, default="magma", help="Matplotlib colormap to use for simulated intensity.")
     plot_group.add_argument("--cscale", type=str, choices=["linear", "log", "sqrt"], default="linear", help="Colorbar scaling for ARPES intensity.")
+    plot_group.add_argument("--temperature", type=_nonnegative_float, default=None,
+                            help="Sample temperature (K). Applies the Fermi-Dirac occupation f(E-Ef,T) to the simulated intensity, cutting off unoccupied states. Omitted by default, which leaves states above Ef fully bright.")
 
     # Matrix elements (orbital/site-projected intensity weighting)
     me_group = parser.add_argument_group("Matrix Elements (requires LORBIT=11/12 in the VASP run)")

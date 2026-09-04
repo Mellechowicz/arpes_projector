@@ -230,5 +230,80 @@ check("integrate_v is flat for a flat band despite varying hull coverage",
       f"coverage {_cov[_cov>0].min()}..{_cov.max()} of {len(_v)}, relative spread {_spread:.1e}")
 
 
+# --- Fermi-Dirac occupation behind --temperature ------------------------------
+from arpes_projector.plotter import K_BOLTZMANN_EV
+from arpes_projector.cli import build_parser as _bp
+
+# The whole point of the flag is that it is opt-in: without it, nothing moves.
+_I_default = ARPESPlotter(u, v, s0, 0.0).calculate_spectral_density(E)
+check("no --temperature reproduces the previous intensity bit-identically",
+      np.array_equal(_I_default, I0))
+check("temperature defaults to None on the parser",
+      _bp().parse_args([]).temperature is None)
+
+_T = 300.0
+_pT = ARPESPlotter(u, v, s0, 0.0, temperature=_T)
+_I_T = _pT.calculate_spectral_density(E)
+_f = 1.0 / (1.0 + np.exp(E / (K_BOLTZMANN_EV * _T)))
+# f multiplies the spectral function at the probed energy, so the whole
+# constant-energy plane is scaled by one scalar per energy.
+check("intensity is exactly f(E,T) times the unoccupied intensity",
+      np.allclose(_I_T, I0 * _f[:, None, None], rtol=0, atol=1e-12),
+      f"max dev {np.abs(_I_T - I0*_f[:,None,None]).max():.1e}")
+check("occupation is 1/2 exactly at the Fermi level",
+      abs(float(_pT._occupation(np.array([0.0]))[0]) - 0.5) < 1e-15)
+_o = _pT._occupation(np.array([-1.0, -0.01, 0.0, 0.01, 1.0]))
+check("occupation decreases monotonically through E_F", bool(np.all(np.diff(_o) < 0)))
+check("occupation saturates at 1 below and 0 above",
+      _o[0] > 1 - 1e-12 and _o[-1] < 1e-12)
+
+# 50 eV at 1 K is E/kT ~ 6e5: a naive exp() overflows to inf and the ratio to NaN.
+_cold = ARPESPlotter(u, v, s0, 0.0, temperature=1.0)._occupation(np.array([-50.0, 50.0]))
+check("no overflow for |E| >> kT", bool(np.all(np.isfinite(_cold))) and _cold[1] == 0.0,
+      f"f(+50 eV, 1 K) = {_cold[1]:g}")
+
+_zero = ARPESPlotter(u, v, s0, 0.0, temperature=0.0)._occupation(np.array([-0.1, 0.0, 0.1]))
+check("T = 0 K is a step with 1/2 at E_F", np.array_equal(_zero, np.array([1.0, 0.5, 0.0])))
+
+try:
+    ARPESPlotter(u, v, s0, 0.0, temperature=-1.0); _ok = False
+except ValueError:
+    _ok = True
+check("a negative temperature is rejected by the plotter", _ok)
+try:
+    _bp().parse_args(["--temperature", "-5"]); _ok = False
+except SystemExit:
+    _ok = True
+check("--temperature -5 is rejected at parse time", _ok)
+
+# The dispersion slice must pick up the same cutoff; capture what is drawn.
+def _draw(**kw):
+    cap = {}
+    orig = _plt.Axes.pcolormesh
+    def spy(self, *a, **k):
+        if "C" not in cap and len(a) >= 3:
+            cap["C"] = np.asarray(a[2])
+        return orig(self, *a, **k)
+    _plt.Axes.pcolormesh = spy
+    out = os.path.join(REPO, "tests", "_tmp_temperature.png")
+    try:
+        ARPESPlotter(u, v, s0, 0.0, **kw).plot_dispersion_slice(
+                0.0, energy_limits=(-1.0, 1.0), n_energy_points=9, filename=out)
+    finally:
+        _plt.Axes.pcolormesh = orig
+        if os.path.exists(out):
+            os.remove(out)
+    return cap["C"]
+
+_Ed = np.linspace(-1.0, 1.0, 9)
+_fd = 1.0 / (1.0 + np.exp(_Ed / (K_BOLTZMANN_EV * _T)))
+_d0, _dT = _draw(), _draw(temperature=_T)
+check("dispersion slice applies the same f(E,T)",
+      np.allclose(_dT, _d0 * _fd[:, None], rtol=0, atol=1e-12),
+      f"max dev {np.abs(_dT - _d0*_fd[:,None]).max():.1e}")
+check("dispersion slice is unchanged without --temperature",
+      np.array_equal(_d0, _draw()))
+
+
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))
 sys.exit(1 if FAIL else 0)

@@ -57,6 +57,7 @@ Set the execution mode using the `--mode` flag.
 | `--elimits` | Binding energy limits for dispersion slices (2 values). | `-3.0 1.0` |
 | `--miller_surf` | Miller index for the surface (3 values). | `0 0 1` |
 | `--slab_min` / `--vac_min` | Minimum slab and vacuum thickness (A) for the real-space slab. | `15.0` / `20.0` |
+| `--temperature` | Sample temperature (K). Applies the Fermi-Dirac cutoff `f(E-Ef,T)` to the intensity. | None (no cutoff) |
 | `--matrix_elements` | Weight intensity by orbital/site projections instead of treating every band as equally bright. Needs `LORBIT=11` or `12`. | `False` |
 | `--orbital_weights` | Orbital or shell weights, e.g. `"s:1,p:0.5,dz2:2"` or `"d:1"`. Unlisted orbitals get 0 (override with `default:x`). Implies `--matrix_elements`. | None |
 | `--ion_weights` | Per-ion weights in POSCAR order, e.g. `"1,1,0,0,0.5,0.5"`. Implies `--matrix_elements`. | None |
@@ -85,6 +86,31 @@ channels. Only the first is the charge projection; the others are magnetisation
 components and may be negative. The number of sets read follows the eigenvalue
 spin-channel count, so noncollinear runs use the charge projection alone and a
 collinear `ISPIN=2` run uses both channels.
+
+### Fermi-Dirac cutoff
+
+Without `--temperature` the simulated intensity is the bare spectral function,
+so states above the Fermi level are drawn just as brightly as occupied ones -
+useful for inspecting the band structure, but not what a photoemission
+experiment measures. Giving a temperature applies the occupation factor:
+
+```bash
+python arpes.py --mode single --input vasprun.xml --temperature 20
+```
+
+The factor multiplies the spectral function at the *probed* energy, following
+`I(k,w) ~ f(w,T) A(k,w)`, not at each band's own energy. That distinction
+matters: a band sitting just above `E_F` still has Lorentzian weight below it,
+and a real measurement sees that weight. Weighting per band would wrongly
+delete it.
+
+`--temperature 0` gives the hard step (half-occupied exactly at `E_F`). The
+occupation is evaluated with a logistic form, so `|E| >> kT` returns 0 or 1
+rather than overflowing to `NaN`. Runs that pass a temperature write their own
+filenames (`..._T300K.png`), so they do not overwrite runs that do not.
+
+**The flag is opt-in and output without it is bit-identical to before it
+existed** - there is a regression check for exactly that.
 
 ### Behaviour worth knowing
 

@@ -117,13 +117,17 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
             interpolate_factor=args.smooth
             )
 
-    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi, weights=interp_weights)
+    plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, efermi, weights=interp_weights,
+                           temperature=args.temperature)
 
     # 1. Constant Energy Slice
     # Encode the parameters that change the picture, otherwise a second run at a
     # different energy or broadening silently overwrites the first.
-    fs_tag = f"E{args.energy:+.2f}_g{args.broadening:g}_{args.cscale}"
-    disp_tag = f"E{args.elimits[0]:+g}to{args.elimits[1]:+g}_g{args.broadening:g}_{args.cscale}"
+    # Only appended when --temperature is given, so filenames from runs without
+    # it are unchanged.
+    t_tag = "" if args.temperature is None else f"_T{args.temperature:g}K"
+    fs_tag = f"E{args.energy:+.2f}_g{args.broadening:g}_{args.cscale}{t_tag}"
+    disp_tag = f"E{args.elimits[0]:+g}to{args.elimits[1]:+g}_g{args.broadening:g}_{args.cscale}{t_tag}"
     fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}_{fs_tag}.png")
     fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_constant_energy_cut(
@@ -281,7 +285,8 @@ def main():
                 grid_resolution=args.resolution, interpolate_factor=args.smooth, u_dir_cart=u_dir_cart
             )
 
-            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"], weights=interp_weights)
+            plotter = ARPESPlotter(u_grid, v_grid, interp_spectra, data["efermi"], weights=interp_weights,
+                                   temperature=args.temperature)
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
             bands_title = f"Surface Bands {tuple(args.miller_surf)}"

@@ -27,6 +27,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from typing import Tuple, Optional
 from matplotlib.colors import LogNorm, PowerNorm
+from scipy.special import expit
+
+# Boltzmann constant in eV/K (CODATA 2018, exact by SI definition).
+K_BOLTZMANN_EV = 8.617333262e-5
 
 # Attempt to import sumo styling for publication-ready figures
 try:
@@ -39,7 +43,7 @@ class ARPESPlotter:
     """Simulates physical photoemission intensities and generates publication-ready plots."""
 
     def __init__(self, u_grid: np.ndarray, v_grid: np.ndarray, interpolated_spectra: np.ndarray, efermi: float,
-                 weights: np.ndarray = None):
+                 weights: np.ndarray = None, temperature: Optional[float] = None):
         """
         Initialize the plotter.
 
@@ -48,16 +52,51 @@ class ARPESPlotter:
             v_grid (np.ndarray): Local in-plane coordinate axis v, shape (grid_res,).
             interpolated_spectra (np.ndarray): Interpolated energies, shape (nspin, nband, grid_res, grid_res).
             efermi (float): Fermi energy in eV.
+            weights (np.ndarray): Optional per-state matrix-element weights.
+            temperature (Optional[float]): Sample temperature in K. None (the
+                default) leaves the spectrum without an occupation factor,
+                exactly as before; a value applies the Fermi-Dirac cutoff.
         """
         if efermi is None:
             raise ValueError("Fermi energy is None; cannot reference band energies")
+        if temperature is not None and temperature < 0.0:
+            raise ValueError(f"temperature must be >= 0 K, got {temperature}")
         self.u_grid = u_grid
         self.v_grid = v_grid
         self.spectra = interpolated_spectra - efermi  # Shift Fermi level to 0.0 eV
         # Per-state matrix-element weights; None weights every state equally.
         self.weights = None if weights is None else np.nan_to_num(weights, nan=0.0)
+        self.temperature = temperature
         self.efermi = 0.0
         self._apply_styles()
+
+    def _occupation(self, energy_array: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Fermi-Dirac occupation evaluated on the energy axis, or None when no
+        temperature was requested.
+
+        Photoemission measures f(w) A(k,w): the occupation multiplies the
+        spectral function at the *probed* energy, not at each band's own energy.
+        Weighting per band instead would suppress the sub-Fermi tail of a band
+        sitting above E_F, which is exactly the weight a real experiment sees.
+
+        Args:
+            energy_array (np.ndarray): Energies relative to E_F in eV.
+
+        Returns:
+            Optional[np.ndarray]: f(E) with the same shape, or None.
+        """
+        if self.temperature is None:
+            return None
+        kt = K_BOLTZMANN_EV * self.temperature
+        energy_array = np.asarray(energy_array, dtype=float)
+        if kt <= 0.0:
+            # T = 0 K: a hard step, with the half-occupied point kept at E_F so
+            # the limit T -> 0 stays continuous.
+            return np.where(energy_array < 0.0, 1.0,
+                            np.where(energy_array > 0.0, 0.0, 0.5))
+        # expit(-x) == 1/(1+exp(x)) without the overflow at large |E|/kT.
+        return expit(-energy_array / kt)
 
     def _apply_styles(self):
         """Applies Sumo or default plotting parameters for publication-ready outputs."""
@@ -107,6 +146,10 @@ class ARPESPlotter:
                 lorentzian = (1.0 / np.pi) * (broadening / ((e - band_energies) ** 2 + broadening ** 2))
                 lorentzian = np.nan_to_num(lorentzian, nan=0.0)
                 intensity[idx] += lorentzian if wb is None else lorentzian * wb
+
+        occupation = self._occupation(energy_array)
+        if occupation is not None:
+            intensity *= occupation[:, None, None]
 
         return intensity
 
@@ -205,7 +248,7 @@ class ARPESPlotter:
                     intensity_slice[i] += lorentzian if wb is None else lorentzian * wb
             k_axis = self.v_grid
             xlabel = r"$k_v$ ($\mathrm{\AA}^{-1}$)"
-            title = f"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
+            title = rf"Dispersion Slice at $k_u = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
         else:
             # Slicing along constant v coordinate
             idx = np.argmin(np.abs(self.v_grid - slice_coordinate))
@@ -219,7 +262,14 @@ class ARPESPlotter:
                     intensity_slice[i] += lorentzian if wb is None else lorentzian * wb
             k_axis = self.u_grid
             xlabel = r"$k_u$ ($\mathrm{\AA}^{-1}$)"
-            title = f"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
+            title = rf"Dispersion Slice at $k_v = {slice_coordinate:.2f}$ $\mathrm{{\AA}}^{{-1}}$"
+
+        # The Fermi cutoff is a property of the probed energy, so it applies
+        # identically to all three slicing branches - and it commutes with the
+        # per-column integrate_v normalisation above.
+        occupation = self._occupation(energy_axis)
+        if occupation is not None:
+            intensity_slice *= occupation[:, None]
 
         norm = LogNorm(vmin=max(intensity_slice.min(), 1e-5), vmax=intensity_slice.max()) if cscale == "log" else (PowerNorm(0.5) if cscale == "sqrt" else None)
         fig, ax = plt.subplots(figsize=(6, 5))

@@ -102,19 +102,70 @@ class VaspDataParser:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"VASP output file not found at: {filepath}")
 
-    def parse(self) -> Dict[str, Any]:
+    def parse(self, use_cache: bool = True) -> Dict[str, Any]:
         """
         Dynamically dispatches parsing depending on the file extension.
+
+        Args:
+            use_cache (bool): When True (default), reuse/write a small .npz
+                cache next to the input file so repeated invocations skip
+                re-parsing multi-GB outputs entirely.
 
         Returns:
             Dict[str, Any]: Structured data containing kpoints, eigenvalues, efermi,
                             and reciprocal lattice vectors.
         """
+        cache_path = self.filepath + ".arpes_cache.npz"
+        if use_cache:
+            cached = self._load_cache(cache_path)
+            if cached is not None:
+                return cached
+
         _, ext = os.path.splitext(self.filepath)
         if ext.lower() == ".h5":
-            return self._parse_h5()
+            data = self._parse_h5()
         else:
-            return self._parse_xml()
+            data = self._parse_xml()
+
+        if use_cache:
+            self._write_cache(cache_path, data)
+        return data
+
+    def _load_cache(self, cache_path: str) -> Dict[str, Any]:
+        """Returns cached parse results if present and newer than the input, else None."""
+        try:
+            # Strictly newer: equal timestamps (same clock tick) count as stale,
+            # so ambiguity resolves toward re-parsing rather than stale data.
+            if not (os.path.exists(cache_path)
+                    and os.path.getmtime(cache_path) > os.path.getmtime(self.filepath)):
+                return None
+            with np.load(cache_path) as z:
+                data = {
+                        "kpoints": z["kpoints"],
+                        "eigenvalues": z["eigenvalues"],
+                        "efermi": float(z["efermi"]),
+                        "rec_lattice": z["rec_lattice"],
+                        "is_spin_polarized": bool(z["is_spin_polarized"])
+                        }
+            print(f"[Parser] Loaded cached parse results: {cache_path}")
+            return data
+        except Exception as exc:
+            print(f"[Parser] Ignoring unreadable cache {cache_path}: {exc}")
+            return None
+
+    @staticmethod
+    def _write_cache(cache_path: str, data: Dict[str, Any]) -> None:
+        """Persists parse results next to the input file; failures are non-fatal."""
+        try:
+            np.savez(cache_path,
+                     kpoints=data["kpoints"],
+                     eigenvalues=data["eigenvalues"],
+                     efermi=data["efermi"],
+                     rec_lattice=data["rec_lattice"],
+                     is_spin_polarized=data["is_spin_polarized"])
+            print(f"[Parser] Cached parse results to {cache_path}")
+        except OSError as exc:
+            print(f"[Parser] Could not write cache {cache_path}: {exc}")
 
     # Above this file size, pymatgen's DOM-building parser is replaced by the
     # constant-memory streaming parser (peak RSS for a 9 GB vasprun.xml drops

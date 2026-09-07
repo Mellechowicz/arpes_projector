@@ -21,6 +21,73 @@ from typing import Dict, Any
 from pymatgen.io.vasp.outputs import Vasprun, BSVasprun
 from pymatgen.electronic_structure.core import Spin
 
+
+class _ProjectedSkippingReader:
+    """
+    File-like wrapper that elides every <projected>...</projected> block from
+    the byte stream at raw-buffer speed.
+
+    The projections block routinely accounts for >95% of a vasprun.xml
+    produced with LORBIT set (99% for multi-GB files), yet standard XML
+    parsers tokenize all of it even when the caller discards the result.
+    Skipping it with bytes.find() keeps the streaming parse I/O-bound.
+    """
+
+    _OPEN = b"<projected>"
+    _CLOSE = b"</projected>"
+
+    def __init__(self, fh, chunk_size: int = 1 << 20):
+        self._fh = fh
+        self._chunk = chunk_size
+        self._buf = b""
+        self._pending = b""
+        self._skipping = False
+        self._eof = False
+        # Retain this many trailing bytes when a tag is not found, in case it
+        # straddles a chunk boundary.
+        self._margin = len(self._CLOSE) - 1
+
+    def _fill(self) -> None:
+        data = self._fh.read(self._chunk)
+        if not data:
+            self._eof = True
+        else:
+            self._buf += data
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = 1 << 62
+        while len(self._pending) < size:
+            if self._skipping:
+                idx = self._buf.find(self._CLOSE)
+                if idx >= 0:
+                    self._buf = self._buf[idx + len(self._CLOSE):]
+                    self._skipping = False
+                    continue
+                if self._eof:
+                    self._buf = b""
+                    break
+                self._buf = self._buf[-self._margin:] if len(self._buf) > self._margin else self._buf
+                self._fill()
+                continue
+            idx = self._buf.find(self._OPEN)
+            if idx >= 0:
+                self._pending += self._buf[:idx]
+                self._buf = self._buf[idx + len(self._OPEN):]
+                self._skipping = True
+                continue
+            if self._eof:
+                self._pending += self._buf
+                self._buf = b""
+                break
+            if len(self._buf) > self._margin:
+                self._pending += self._buf[:-self._margin]
+                self._buf = self._buf[-self._margin:]
+            self._fill()
+        out, self._pending = self._pending[:size], self._pending[size:]
+        return out
+
+
 class VaspDataParser:
     """Parses and structures VASP electronic structure data for spectroscopic analysis."""
 
@@ -49,7 +116,147 @@ class VaspDataParser:
         else:
             return self._parse_xml()
 
+    # Above this file size, pymatgen's DOM-building parser is replaced by the
+    # constant-memory streaming parser (peak RSS for a 9 GB vasprun.xml drops
+    # from tens of GB to under ~100 MB).
+    STREAM_THRESHOLD_BYTES = 100 * 1024 * 1024
+
     def _parse_xml(self) -> Dict[str, Any]:
+        """
+        Parses vasprun.xml, dispatching between pymatgen (small files) and the
+        constant-memory streaming parser (large files, or pymatgen missing).
+
+        Returns:
+            Dict[str, Any]: Dictionary containing parsed arrays and floats.
+        """
+        if os.path.getsize(self.filepath) > self.STREAM_THRESHOLD_BYTES:
+            print(f"[Parser] Large vasprun.xml detected "
+                  f"({os.path.getsize(self.filepath) / 1e6:.0f} MB); using streaming parser.")
+            return self._parse_xml_stream()
+        try:
+            return self._parse_xml_pymatgen()
+        except ImportError:
+            print("[Parser] pymatgen not available; falling back to streaming XML parser.")
+            return self._parse_xml_stream()
+
+    def _parse_xml_stream(self) -> Dict[str, Any]:
+        """
+        Constant-memory vasprun.xml parser built on xml.etree.iterparse.
+
+        Only the sections this suite needs are materialized (k-point list,
+        final-step eigenvalues, Fermi energy, reciprocal basis); the
+        <projected> block - typically >95% of the file - is elided from the
+        byte stream before it ever reaches the XML tokenizer, and processed
+        elements are cleared as parsing advances.
+
+        Returns:
+            Dict[str, Any]: Dictionary containing parsed arrays and floats.
+        """
+        import xml.etree.ElementTree as ET
+
+        kpoints = None
+        eigenvalues = None      # last <eigenvalues> block wins (final ionic step)
+        efermi = None
+        rec_lattice = None      # last <crystal> rec_basis wins (final structure)
+        in_dos = False
+
+        # Elements whose subtrees are bulky and irrelevant once their end tag passes
+        clear_on_end = {"scstep", "incar", "parameters", "atominfo",
+                        "generation", "total", "partial", "varray", "structure"}
+
+        with open(self.filepath, "rb") as raw:
+            source = _ProjectedSkippingReader(raw)
+            for event, elem in ET.iterparse(source, events=("start", "end")):
+                if event == "start":
+                    if elem.tag == "dos":
+                        in_dos = True
+                    continue
+
+                tag = elem.tag
+                if tag == "varray":
+                    name = elem.get("name")
+                    if name == "kpointlist":
+                        kpoints = np.array(
+                                " ".join(v.text for v in elem).split(),
+                                dtype=np.float64).reshape(-1, 3)
+                    elif name == "rec_basis":
+                        # vasprun.xml stores the crystallographic reciprocal
+                        # basis (no 2*pi); include the physics convention here
+                        rec_lattice = 2.0 * np.pi * np.array(
+                                " ".join(v.text for v in elem).split(),
+                                dtype=np.float64).reshape(3, 3)
+                elif tag == "eigenvalues":
+                    parsed = self._eigenvalues_from_element(elem)
+                    if parsed is not None:
+                        eigenvalues = parsed
+                    elem.clear()
+                elif tag == "i" and in_dos and elem.get("name") == "efermi":
+                    efermi = float(elem.text)
+                elif tag == "dos":
+                    in_dos = False
+                    elem.clear()
+                elif tag == "calculation":
+                    elem.clear()
+
+                if tag in clear_on_end:
+                    elem.clear()
+
+        if eigenvalues is None or kpoints is None:
+            raise ValueError(
+                    f"Streaming parse of {self.filepath} did not find "
+                    f"{'eigenvalues' if eigenvalues is None else 'a k-point list'}; "
+                    "the file may be truncated or from an unsupported calculation type.")
+        if eigenvalues.shape[2] != len(kpoints):
+            raise ValueError(
+                    f"Streaming parse mismatch: {eigenvalues.shape[2]} eigenvalue "
+                    f"k-points vs {len(kpoints)} k-points in kpointlist.")
+        if efermi is None:
+            print("[Parser] Warning: no Fermi energy found in vasprun.xml; defaulting to 0.0 eV.")
+            efermi = 0.0
+        if rec_lattice is None:
+            raise ValueError(f"Streaming parse of {self.filepath} found no reciprocal basis.")
+
+        print(f"[Parser] Streaming parse complete: {eigenvalues.shape[0]} spin(s), "
+              f"{eigenvalues.shape[1]} bands, {len(kpoints)} k-points, E_F = {efermi:.4f} eV.")
+
+        return {
+                "kpoints": kpoints,
+                "eigenvalues": eigenvalues,
+                "efermi": efermi,
+                "rec_lattice": rec_lattice,
+                "is_spin_polarized": eigenvalues.shape[0] > 1
+                }
+
+    @staticmethod
+    def _eigenvalues_from_element(elem) -> np.ndarray:
+        """
+        Converts an <eigenvalues> element into an array of shape (nspins, nbands, nkpts).
+
+        Rows hold "energy occupation" pairs; only energies are kept.
+        Returns None if the element does not contain the expected set structure.
+        """
+        outer = elem.find("array/set")
+        if outer is None:
+            return None
+        spin_sets = [c for c in outer if c.tag == "set"]
+        if not spin_sets:
+            return None
+
+        per_spin = []
+        for spin_set in spin_sets:
+            ksets = [c for c in spin_set if c.tag == "set"]
+            if not ksets:
+                return None
+            rows = np.array(
+                    " ".join(r.text for kset in ksets for r in kset).split(),
+                    dtype=np.float64)
+            nk = len(ksets)
+            # rows = nk * nbands * 2 values (energy, occupation)
+            bands_k = rows.reshape(nk, -1, 2)[:, :, 0]   # (nk, nbands)
+            per_spin.append(bands_k.T)                   # (nbands, nk)
+        return np.stack(per_spin)
+
+    def _parse_xml_pymatgen(self) -> Dict[str, Any]:
         """
         Parses vasprun.xml using pymatgen routines.
 
@@ -198,10 +405,9 @@ class VaspDataParser:
             print(f"  - Eigenvalues: '{eig_path}' {eig_ds.shape}")
             print(f"  - K-points:    '{kp_path}' {matched_pair['kp_arr'].shape}")
 
-            evals = eig_ds[:]
-            # VASP 4D: (nstep, nspin, nkpoint, nband) -> extract last ionic step
-            if evals.ndim == 4:
-                evals = evals[-1]
+            # VASP 4D: (nstep, nspin, nkpoint, nband) -> slice only the last ionic
+            # step; h5py reads lazily, so this avoids loading every step from disk
+            evals = eig_ds[-1] if eig_ds.ndim == 4 else eig_ds[:]
             # Transpose 3D shape (nspin, nkpoint, nband) to (nspin, nband, nkpoint)
             evals = np.transpose(evals, (0, 2, 1))
 

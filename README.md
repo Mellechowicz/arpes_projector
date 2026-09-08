@@ -73,6 +73,8 @@ python arpes.py --mode multi --input vaspout.h5 --outdir results_dir
 ```bash
 python arpes.py --mode surface_bz --input vasprun.xml --miller_surf 1 1 1
 ```
+## Acknowledgements
+We gratefully acknowledge Polish high-performance computing infrastructure PLGrid (HPC Center: ACK Cyfronet AGH) for providing computer facilities and support within computational grant no. PLG/2026/019296.
 
 ## Disclaimer
 Google Gemini was used to assist in the development of this project.

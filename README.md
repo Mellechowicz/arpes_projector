@@ -87,6 +87,21 @@ components and may be negative. The number of sets read follows the eigenvalue
 spin-channel count, so noncollinear runs use the charge projection alone and a
 collinear `ISPIN=2` run uses both channels.
 
+### Large `vasprun.xml` files
+
+`vasprun.xml` above 100 MB is read by a constant-memory streaming parser
+instead of pymatgen's DOM parser, which would need tens of GB of RAM for a
+multi-GB file. The `<projected>` block - usually well over 95% of the file - is
+elided from the byte stream before the tokenizer sees it. On a 600 MB file the
+streaming parser reproduces pymatgen's k-points, eigenvalues and Fermi energy
+bit-for-bit (the reciprocal lattice to the ~8 digits the XML prints) and is
+about 9x faster; there is a regression check for that equivalence.
+
+Results are cached in `<input>.arpes_cache.npz` next to the input, so repeated
+runs skip the parse entirely. The cache is used only when it is strictly newer
+than the input file - an equal timestamp counts as stale - so editing or
+re-running VASP invalidates it automatically.
+
 ### Fermi-Dirac cutoff
 
 Without `--temperature` the simulated intensity is the bare spectral function,

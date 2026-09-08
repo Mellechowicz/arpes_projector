@@ -305,5 +305,52 @@ check("dispersion slice is unchanged without --temperature",
       np.array_equal(_d0, _draw()))
 
 
+# --- streaming vasprun.xml parser -------------------------------------------
+_XML = os.path.join(REPO, "040", "vasprun.xml")
+if os.path.exists(_XML):
+    from arpes_projector.parser import VaspDataParser
+    _p = VaspDataParser(_XML)
+    try:
+        _ref = _p._parse_xml_pymatgen()
+    except ImportError:
+        _ref = None
+    _str = _p._parse_xml_stream()
+    if _ref is not None:
+        # The streaming parser exists to avoid holding a multi-GB DOM; it is only
+        # useful if it reproduces the DOM parser exactly.
+        check("streaming parser reproduces pymatgen eigenvalues exactly",
+              np.array_equal(np.asarray(_ref["eigenvalues"]), np.asarray(_str["eigenvalues"])))
+        check("streaming parser reproduces pymatgen k-points exactly",
+              np.array_equal(np.asarray(_ref["kpoints"]), np.asarray(_str["kpoints"])))
+        check("streaming parser agrees on E_F and spin polarisation",
+              _ref["efermi"] == _str["efermi"]
+              and bool(_ref["is_spin_polarized"]) == bool(_str["is_spin_polarized"]))
+        _dev = np.abs(np.asarray(_ref["rec_lattice"]) - np.asarray(_str["rec_lattice"])).max()
+        # The XML prints the reciprocal basis to ~8 digits; that is the only
+        # discrepancy allowed here.
+        check("streaming parser agrees on the reciprocal lattice", _dev < 1e-6,
+              f"max dev {_dev:.1e}")
+    # The cache must never outlive the file it describes.
+    _cp = os.path.join(REPO, "tests", "_tmp_cache.npz")
+    VaspDataParser._write_cache(_cp, _str)
+    _sp = VaspDataParser(_XML)
+    _fresh = _sp._load_cache(_cp)
+    check("a cache newer than the input is reused and round-trips",
+          _fresh is not None
+          and np.array_equal(_fresh["eigenvalues"], np.asarray(_str["eigenvalues"]))
+          and _fresh["efermi"] == _str["efermi"])
+    # Back-date it to one second before the input: the parse must be redone.
+    _in_mtime = os.path.getmtime(_XML)
+    os.utime(_cp, (_in_mtime - 1.0, _in_mtime - 1.0))
+    check("a cache older than the input is refused", _sp._load_cache(_cp) is None)
+    # Equal timestamps are ambiguous, so they must resolve toward re-parsing.
+    os.utime(_cp, (_in_mtime, _in_mtime))
+    check("a cache with the input's own timestamp is refused",
+          _sp._load_cache(_cp) is None)
+    os.remove(_cp)
+else:
+    print("[SKIP] streaming-parser checks (040/vasprun.xml absent)")
+
+
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))
 sys.exit(1 if FAIL else 0)

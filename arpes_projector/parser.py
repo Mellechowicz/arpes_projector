@@ -168,8 +168,9 @@ class VaspDataParser:
             print(f"[Parser] Could not write cache {cache_path}: {exc}")
 
     # Above this file size, pymatgen's DOM-building parser is replaced by the
-    # constant-memory streaming parser (peak RSS for a 9 GB vasprun.xml drops
-    # from tens of GB to under ~100 MB).
+    # streaming parser. Measured on a 9.33 GiB noncollinear vasprun.xml
+    # (136 bands, 19683 k-points): 14.7 s at 0.29 GB peak RSS, about 3% of the
+    # file. The earlier "under ~100 MB" note here was an unmeasured estimate.
     STREAM_THRESHOLD_BYTES = 100 * 1024 * 1024
 
     def _parse_xml(self) -> Dict[str, Any]:
@@ -211,6 +212,17 @@ class VaspDataParser:
         rec_lattice = None      # last <crystal> rec_basis wins (final structure)
         in_dos = False
 
+        # Eigenvalues are drained k-point by k-point rather than left to
+        # accumulate. The <projected> block is elided from the byte stream, but
+        # <eigenvalues> still holds one <r> element per band per k-point, and an
+        # ElementTree node costs far more than the two floats it carries: on a
+        # 9.33 GiB file that subtree alone was 2.7M nodes and 1.2 GB, which was
+        # the entire measured peak. Clearing each k-point <set> as its end tag
+        # passes keeps only the finished float rows.
+        in_eig = False
+        eig_depth = 0           # <set> nesting inside <eigenvalues>: 1 outer, 2 spin, 3 k-point
+        eig_spins = []          # one list of per-k-point band-energy arrays per spin
+
         # Elements whose subtrees are bulky and irrelevant once their end tag passes
         clear_on_end = {"scstep", "incar", "parameters", "atominfo",
                         "generation", "total", "partial", "varray", "structure"}
@@ -221,9 +233,24 @@ class VaspDataParser:
                 if event == "start":
                     if elem.tag == "dos":
                         in_dos = True
+                    elif elem.tag == "eigenvalues":
+                        in_eig, eig_depth, eig_spins = True, 0, []
+                    elif in_eig and elem.tag == "set":
+                        eig_depth += 1
+                        if eig_depth == 2:
+                            eig_spins.append([])
                     continue
 
                 tag = elem.tag
+                if in_eig and tag == "set":
+                    if eig_depth == 3 and eig_spins:
+                        # <r> rows are "energy occupation"; keep the energies.
+                        rows = np.array(
+                                " ".join(r.text for r in elem if r.tag == "r").split(),
+                                dtype=np.float64).reshape(-1, 2)
+                        eig_spins[-1].append(rows[:, 0])
+                        elem.clear()
+                    eig_depth -= 1
                 if tag == "varray":
                     name = elem.get("name")
                     if name == "kpointlist":
@@ -237,9 +264,12 @@ class VaspDataParser:
                                 " ".join(v.text for v in elem).split(),
                                 dtype=np.float64).reshape(3, 3)
                 elif tag == "eigenvalues":
-                    parsed = self._eigenvalues_from_element(elem)
-                    if parsed is not None:
-                        eigenvalues = parsed
+                    in_eig = False
+                    if eig_spins and all(eig_spins):
+                        # (nspins, nkpts, nbands) -> (nspins, nbands, nkpts)
+                        eigenvalues = np.array(
+                                [np.stack(ks) for ks in eig_spins]).transpose(0, 2, 1)
+                    eig_spins = []
                     elem.clear()
                 elif tag == "i" and in_dos and elem.get("name") == "efermi":
                     efermi = float(elem.text)

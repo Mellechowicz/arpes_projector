@@ -90,13 +90,25 @@ collinear `ISPIN=2` run uses both channels.
 
 ### Large `vasprun.xml` files
 
-`vasprun.xml` above 100 MB is read by a constant-memory streaming parser
-instead of pymatgen's DOM parser, which would need tens of GB of RAM for a
-multi-GB file. The `<projected>` block - usually well over 95% of the file - is
-elided from the byte stream before the tokenizer sees it. On a 600 MB file the
-streaming parser reproduces pymatgen's k-points, eigenvalues and Fermi energy
-bit-for-bit (the reciprocal lattice to the ~8 digits the XML prints) and is
-about 9x faster; there is a regression check for that equivalence.
+`vasprun.xml` above 100 MB is read by a streaming parser instead of pymatgen's
+DOM parser, which builds the whole document in memory. The `<projected>` block -
+usually well over 95% of the file - is elided from the byte stream before the
+tokenizer sees it.
+
+Measured on a 9.33 GiB noncollinear `vasprun.xml` (136 bands, 19683 k-points):
+**14.7 s at 0.29 GB peak RSS** - about 3% of the file size.
+
+That measurement is also what found the remaining leak. Eliding `<projected>`
+from the byte stream was not enough: `<eigenvalues>` still holds one `<r>`
+element per band per k-point, and an ElementTree node costs far more than the
+two floats it carries. On this file that subtree was 2.7M nodes and 1.2 GB -
+the entire peak. Draining it k-point by k-point instead cut peak RSS from
+1.29 GB to 0.29 GB with byte-identical output.
+
+On a 600 MB file the streaming parser reproduces pymatgen's k-points,
+eigenvalues and Fermi energy bit-for-bit (the reciprocal lattice to the ~8
+digits the XML prints) and is about 9x faster; there is a regression check for
+that equivalence.
 
 Results are cached in `<input>.arpes_cache.npz` next to the input, so repeated
 runs skip the parse entirely. The cache is used only when it is strictly newer

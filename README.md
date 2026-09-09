@@ -95,15 +95,27 @@ DOM parser, which builds the whole document in memory. The `<projected>` block -
 usually well over 95% of the file - is elided from the byte stream before the
 tokenizer sees it.
 
-Measured on a 9.33 GiB noncollinear `vasprun.xml` (136 bands, 19683 k-points):
-**14.7 s at 0.29 GB peak RSS** - about 3% of the file size.
+Both parsers measured on one Helios node against the same 9.33 GiB
+noncollinear `vasprun.xml` (136 bands, 19683 k-points, `LNONCOLLINEAR = T`,
+`LORBIT = 11`):
 
-That measurement is also what found the remaining leak. Eliding `<projected>`
-from the byte stream was not enough: `<eigenvalues>` still holds one `<r>`
-element per band per k-point, and an ElementTree node costs far more than the
-two floats it carries. On this file that subtree was 2.7M nodes and 1.2 GB -
-the entire peak. Draining it k-point by k-point instead cut peak RSS from
-1.29 GB to 0.29 GB with byte-identical output.
+| | streaming | pymatgen `BSVasprun` | ratio |
+| :--- | ---: | ---: | ---: |
+| wall time | 10.1 s | 100.9 s | 10.0x |
+| peak RSS | 0.22 GB | 38.2 GB | 171x |
+
+The two agree exactly: identical SHA-256 over the eigenvalue and k-point
+arrays, same Fermi energy, with the reciprocal lattice differing only in the
+8th digit the XML prints. 38 GB still fits a standard 386 GB node, so the DOM
+parser is not unusable here - it is merely 171x more expensive for the same
+answer, and it scales with the file while the streaming parser does not.
+
+Measuring it is also what found the remaining leak. Eliding `<projected>` from
+the byte stream was not enough: `<eigenvalues>` still holds one `<r>` element
+per band per k-point, and an ElementTree node costs far more than the two
+floats it carries. On this file that subtree was 2.7M nodes and 1.2 GB - the
+entire peak. Draining it k-point by k-point cut peak RSS from 1.29 GB to
+0.22 GB with byte-identical output.
 
 On a 600 MB file the streaming parser reproduces pymatgen's k-points,
 eigenvalues and Fermi energy bit-for-bit (the reciprocal lattice to the ~8

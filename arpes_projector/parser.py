@@ -168,9 +168,11 @@ class VaspDataParser:
             print(f"[Parser] Could not write cache {cache_path}: {exc}")
 
     # Above this file size, pymatgen's DOM-building parser is replaced by the
-    # streaming parser. Measured on a 9.33 GiB noncollinear vasprun.xml
-    # (136 bands, 19683 k-points): 14.7 s at 0.29 GB peak RSS, about 3% of the
-    # file. The earlier "under ~100 MB" note here was an unmeasured estimate.
+    # streaming parser. Measured on one node against a 9.33 GiB noncollinear
+    # vasprun.xml (136 bands, 19683 k-points): 10.1 s at 0.22 GB peak RSS,
+    # against 100.9 s at 38.2 GB for pymatgen's BSVasprun on the same file -
+    # 10x faster, 171x smaller, byte-identical eigenvalues and k-points. The
+    # earlier "under ~100 MB" note here was an unmeasured estimate.
     STREAM_THRESHOLD_BYTES = 100 * 1024 * 1024
 
     def _parse_xml(self) -> Dict[str, Any]:

@@ -22,7 +22,9 @@ Execution:
 """
 
 import os
+import re
 import sys
+import hashlib
 import numpy as np
 
 # Adjust imports according to your package structure
@@ -105,6 +107,49 @@ def load_matrix_element_weights(args, input_resolved, eigenvalues):
                          f"eigenvalues {eigenvalues.shape}")
     return weights
 
+def _slug(text: str, limit: int = 28) -> str:
+    """Reduces an arbitrary CLI spec to a short, filename-safe fragment."""
+    clean = re.sub(r"[^0-9A-Za-z.+-]+", "-", text).strip("-")
+    if len(clean) <= limit:
+        return clean
+    # Long specs would make unwieldy names; keep a readable prefix and make the
+    # rest unambiguous with a digest rather than truncating into a collision.
+    return clean[:limit - 9] + "-" + hashlib.sha1(text.encode()).hexdigest()[:8]
+
+
+def figure_tag(args, energy_part: str, weighted: bool = None) -> str:
+    """
+    Builds the filename fragment encoding every argument that changes the figure.
+
+    Runs differing only in temperature, orbital weighting or colour scale would
+    otherwise land on the same path and the later one would silently replace the
+    earlier. Each component is appended only when it is in play, so filenames
+    from runs that use none of them are unchanged.
+
+    Args:
+        args: Parsed CLI namespace.
+        energy_part (str): Caller-specific energy fragment, already formatted.
+        weighted (bool): Whether matrix-element weights were actually applied.
+            None infers it from the flags. Pass False when the weights were
+            requested but could not be built - a --mock run, say - so the name
+            does not advertise a weighting the figure does not carry.
+
+    Returns:
+        str: The tag, without a leading or trailing separator.
+    """
+    tag = f"{energy_part}_g{args.broadening:g}_{args.cscale}"
+    if args.temperature is not None:
+        tag += f"_T{args.temperature:g}K"
+    if weighted is False:
+        return tag
+    spec = "+".join(t for t in (args.orbital_weights, args.ion_weights) if t)
+    if spec:
+        tag += "_me-" + _slug(spec)
+    elif getattr(args, "matrix_elements", False):
+        tag += "_me"
+    return tag
+
+
 def execute_projection(projector, efermi, args, normal_frac, plane_label):
     """Helper method to interpolate and plot projection slices."""
     print(f"\n[Geometry] Interpolating onto plane (Normal: {normal_frac})...")
@@ -123,11 +168,9 @@ def execute_projection(projector, efermi, args, normal_frac, plane_label):
     # 1. Constant Energy Slice
     # Encode the parameters that change the picture, otherwise a second run at a
     # different energy or broadening silently overwrites the first.
-    # Only appended when --temperature is given, so filenames from runs without
-    # it are unchanged.
-    t_tag = "" if args.temperature is None else f"_T{args.temperature:g}K"
-    fs_tag = f"E{args.energy:+.2f}_g{args.broadening:g}_{args.cscale}{t_tag}"
-    disp_tag = f"E{args.elimits[0]:+g}to{args.elimits[1]:+g}_g{args.broadening:g}_{args.cscale}{t_tag}"
+    weighted = interp_weights is not None
+    fs_tag = figure_tag(args, f"E{args.energy:+.2f}", weighted)
+    disp_tag = figure_tag(args, f"E{args.elimits[0]:+g}to{args.elimits[1]:+g}", weighted)
     fs_file = os.path.join(args.outdir, f"fermi_surface_{plane_label}_{fs_tag}.png")
     fs_title = f"Constant Energy Contour ($E - E_F = {args.energy:.2f}$ eV)\nMiller/Label: {plane_label} | Vector: {np.round(normal_frac, 3)}"
     plotter.plot_constant_energy_cut(
@@ -289,11 +332,16 @@ def main():
                                    temperature=args.temperature)
             clean = pt_info['raw'].replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
 
+            # The surface index defines these bands, yet only the path label was
+            # in the name: an (001) and a (111) run collided in one --outdir.
+            sbz_tag = ("m" + "".join(f"{int(m):+d}" for m in args.miller_surf) + "_"
+                       + figure_tag(args, f"E{args.elimits[0]:+g}to{args.elimits[1]:+g}",
+                                     interp_weights is not None))
             bands_title = f"Surface Bands {tuple(args.miller_surf)}"
             plotter.plot_dispersion_slice(
                 slice_coordinate=0.0, along_v=False, energy_limits=tuple(args.elimits),
                 n_energy_points=args.n_energy, broadening=args.broadening, cmap=args.cmap,
-                filename=os.path.join(args.outdir, f"sbz_bands_{clean}_G_{clean}.png"),
+                filename=os.path.join(args.outdir, f"sbz_bands_{clean}_G_{clean}_{sbz_tag}.png"),
                 integrate_v=True, custom_xticks=[-dist, 0.0, dist],
                 custom_xticklabels=[f"$-{pt_info['label'][1:-1]}$", r'$\bar{\Gamma}$', f"$+{pt_info['label'][1:-1]}$"],
                 cscale=args.cscale, custom_title=bands_title

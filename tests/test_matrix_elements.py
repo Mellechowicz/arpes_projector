@@ -5,7 +5,7 @@ Run:  python3 tests/test_matrix_elements.py
 Real-data checks are skipped when 040/vasprun.xml is absent.
 Exit code is non-zero if any check fails.
 """
-import os, sys, numpy as np, matplotlib
+import os, re, sys, numpy as np, matplotlib
 matplotlib.use("Agg")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -350,6 +350,60 @@ if os.path.exists(_XML):
     os.remove(_cp)
 else:
     print("[SKIP] streaming-parser checks (040/vasprun.xml absent)")
+
+
+# --- filename tags ------------------------------------------------------------
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("_arpes_main", os.path.join(REPO, "arpes.py"))
+_am = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_am)
+from arpes_projector.cli import build_parser as _bp2
+
+def _tag(argv):
+    return _am.figure_tag(_bp2().parse_args(argv), "E+0.00")
+
+_plain = _tag([])
+# Runs using none of the optional knobs must keep the names they already have.
+check("the plain tag is unchanged by the shared helper", _plain == "E+0.00_g0.05_linear")
+# Every knob that changes the figure must change the name.
+_variants = {
+        "plain": _plain,
+        "temperature": _tag(["--temperature", "300"]),
+        "orbital": _tag(["--orbital_weights", "d:1"]),
+        "other orbital": _tag(["--orbital_weights", "p:1"]),
+        "ion": _tag(["--ion_weights", "1,0,0"]),
+        "bare --matrix_elements": _tag(["--matrix_elements"]),
+        "broadening": _tag(["--broadening", "0.1"]),
+        "cscale": _tag(["--cscale", "log"]),
+        }
+check("every figure-changing flag yields a distinct filename tag",
+      len(set(_variants.values())) == len(_variants),
+      f"{len(set(_variants.values()))} distinct of {len(_variants)}")
+# This is the collision the multi-mode run actually hit: a d-weighted run wrote
+# the same names as an unweighted one.
+check("a weighted run no longer collides with an unweighted one",
+      _variants["orbital"] != _plain, _variants["orbital"])
+check("tags contain no path or shell-hostile characters",
+      all(re.fullmatch(r"[0-9A-Za-z.+_-]+", t) for t in _variants.values()))
+# --mock cannot supply projections, so a requested weighting is dropped with a
+# warning; the name must not then claim a weighting the figure does not carry.
+check("a dropped weighting is not advertised in the filename",
+      _am.figure_tag(_bp2().parse_args(["--orbital_weights", "d:1"]), "E+0.00", False) == _plain)
+check("an applied weighting is still advertised",
+      _am.figure_tag(_bp2().parse_args(["--orbital_weights", "d:1"]), "E+0.00", True) != _plain)
+# A long ion list must stay short without silently colliding.
+_long_a = _tag(["--ion_weights", ",".join(["0.5"] * 40)])
+_long_b = _tag(["--ion_weights", ",".join(["0.25"] * 40)])
+check("a long weight spec is shortened but stays unique",
+      _long_a != _long_b and len(_long_a) < 60, f"len {len(_long_a)}")
+# The surface index defines the surface bands, so it must be in their name.
+_ns = _bp2().parse_args(["--miller_surf", "1", "1", "1"])
+_no = _bp2().parse_args(["--miller_surf", "0", "0", "1"])
+_sbz = lambda a: "m" + "".join(f"{int(m):+d}" for m in a.miller_surf)
+check("surface_bands names distinguish the Miller index", _sbz(_ns) != _sbz(_no),
+      f"{_sbz(_ns)} vs {_sbz(_no)}")
+check("negative Miller indices stay unambiguous",
+      _sbz(_bp2().parse_args(["--miller_surf", "-1", "1", "1"]))
+      != _sbz(_bp2().parse_args(["--miller_surf", "1", "-1", "1"])))
 
 
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))

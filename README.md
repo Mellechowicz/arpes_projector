@@ -130,8 +130,13 @@ existed** - there is a regression check for exactly that.
 ### Behaviour worth knowing
 
 * **Output filenames encode the parameters that change the figure** - energy or
-  energy limits, broadening and colour scale - so re-running at a different
-  energy no longer overwrites the previous plot.
+  energy limits, broadening, colour scale, temperature and the orbital/ion
+  weighting - so re-running with different settings no longer overwrites the
+  previous plot. `--mode surface_bands` names also carry the surface Miller
+  index, which previously collided: an (001) and a (111) run wrote the same
+  files. A weighting that could not be applied (a `--mock` run has no
+  projections) is *not* named, so a filename never claims a weighting its
+  figure does not carry.
 * **`--mode surface_bz` writes a PNG** into `--outdir`; it previously called
   `plt.show()` unconditionally and produced nothing at all when run headless.
 * **`--slab_min` / `--vac_min` size the real-space slab**, not the surface

@@ -27,7 +27,7 @@ Approach and Modules:
 
 import numpy as np
 from scipy.interpolate import LinearNDInterpolator
-from scipy.spatial import Delaunay
+from scipy.spatial import ConvexHull, Delaunay
 from typing import Tuple
 
 class KSpaceProjector:
@@ -54,6 +54,7 @@ class KSpaceProjector:
         self.kpoints_cart = np.dot(kpoints, rec_lattice)
         # Lazily-built triangulation shared by every band, spin and weight column
         self._triangulation = None
+        self._hull = None
 
     def build_triangulation(self) -> Delaunay:
         """
@@ -66,6 +67,59 @@ class KSpaceProjector:
         if self._triangulation is None:
             self._triangulation = Delaunay(self.kpoints_cart)
         return self._triangulation
+
+    def convex_hull(self) -> ConvexHull:
+        """
+        Builds (once) and returns the convex hull of the k-point cloud.
+
+        Separate from the Delaunay triangulation: the hull has a handful of
+        facets where the triangulation has one simplex per mesh cell, so
+        intersecting a plane with the hull is cheap.
+        """
+        if self._hull is None:
+            self._hull = ConvexHull(self.kpoints_cart)
+        return self._hull
+
+    def _hull_plane_section(self, n_hat: np.ndarray, p_cart: np.ndarray) -> np.ndarray:
+        """
+        Returns the points where the plane crosses the convex hull's edges.
+
+        Those crossings are the vertices of the hull's cross-section, which is
+        exactly the region that can carry interpolated data. Returns None when
+        the plane misses the hull or only grazes it.
+
+        Args:
+            n_hat (np.ndarray): Unit plane normal, Cartesian.
+            p_cart (np.ndarray): A point on the plane, Cartesian.
+
+        Returns:
+            np.ndarray: Crossing points, shape (n, 3), or None.
+        """
+        try:
+            hull = self.convex_hull()
+        except Exception:
+            # A degenerate cloud (coplanar or collinear points) has no 3D hull.
+            return None
+
+        signed = (self.kpoints_cart - p_cart) @ n_hat
+        edges = set()
+        for simplex in hull.simplices:
+            for i in range(len(simplex)):
+                a, b = simplex[i], simplex[(i + 1) % len(simplex)]
+                edges.add((a, b) if a < b else (b, a))
+
+        crossings = []
+        for a, b in edges:
+            da, db = signed[a], signed[b]
+            if (da <= 0.0 <= db) or (db <= 0.0 <= da):
+                if da == db:
+                    # Edge lies in the plane; both endpoints are crossings.
+                    crossings.extend((self.kpoints_cart[a], self.kpoints_cart[b]))
+                    continue
+                t = da / (da - db)
+                crossings.append(self.kpoints_cart[a]
+                                 + t * (self.kpoints_cart[b] - self.kpoints_cart[a]))
+        return np.array(crossings) if len(crossings) >= 3 else None
 
     def define_plane_basis(self, normal_frac: np.ndarray, point_frac: np.ndarray, u_dir_cart: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -119,9 +173,11 @@ class KSpaceProjector:
         outside the convex hull, drawn as zero intensity and indistinguishable
         from a genuine absence of spectral weight.
 
-        Projecting every k-point onto the plane axes bounds the footprint from
-        above: the plane's own intersection with the cloud can only be smaller,
-        so these bounds never crop real data.
+        The window is the bounding box of the convex hull's cross-section by
+        this plane - the exact region that can carry interpolated data - so it
+        never crops real data. When the plane misses the hull, or the cloud is
+        too degenerate to have one, it falls back to projecting every k-point,
+        which bounds the same region from above.
 
         Args:
             normal_frac (np.ndarray): Fractional normal vector defining the plane.
@@ -132,8 +188,14 @@ class KSpaceProjector:
         Returns:
             Tuple[Tuple[float, float], Tuple[float, float]]: (u_range, v_range).
         """
-        _, p_cart, u_hat, v_hat = self.define_plane_basis(normal_frac, point_frac, u_dir_cart)
-        rel = self.kpoints_cart - p_cart
+        n_hat, p_cart, u_hat, v_hat = self.define_plane_basis(normal_frac, point_frac, u_dir_cart)
+
+        # Prefer the hull's actual cross-section. Projecting the whole cloud
+        # bounds the footprint from above and can overshoot badly for an oblique
+        # plane, which is a parallelepiped's long diagonal rather than the much
+        # smaller polygon the plane really cuts.
+        section = self._hull_plane_section(n_hat, p_cart)
+        rel = (section if section is not None else self.kpoints_cart) - p_cart
         ranges = []
         for axis in (u_hat, v_hat):
             proj = rel @ axis

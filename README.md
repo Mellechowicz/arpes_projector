@@ -175,13 +175,17 @@ existed** - there is a regression check for exactly that.
 * **The plot window defaults to the k-point cloud's own footprint** rather than
   a fixed +/-2 A^-1. That fixed window is unrelated to any given calculation:
   for a cloud reaching +/-0.33 A^-1 along v it left 94-95% of every figure
-  outside the convex hull, drawn as zero intensity. Deriving the window from the
-  cloud takes the local 600 MB example from 94-95% empty on all 12 planes to
-  53-74% on 7 of them, and the `--mock` demo from 73% empty to none. The bounds
-  are printed, never applied silently, and an explicit `--ubounds` / `--vbounds`
-  always wins - each axis independently, so you can pin one and derive the
-  other. Because the window projects the whole cloud, it is an upper bound on
-  the slice's own extent and can never crop real data.
+  outside the convex hull, drawn as zero intensity. The window is now the
+  bounding box of the hull's cross-section by that plane - the exact region
+  that can carry interpolated data - so it never crops anything, and for an
+  oblique plane it is far tighter than the cloud's shadow: a (111) or (121) cut
+  through the local 600 MB example takes about 65% of the projected area. Over
+  all 12 planes that run went from 94-95% empty everywhere to a worst case of
+  59%, and the `--mock` demo from 73% empty to no warning at all. Axis-aligned
+  planes gain nothing, because they genuinely do reach the cloud's extremes.
+  The bounds are printed, never applied silently, and an explicit `--ubounds` /
+  `--vbounds` always wins - each axis independently, so you can pin one and
+  derive the other.
 * **Coverage of the k-point cloud is reported.** Points outside its convex hull
   interpolate to NaN and are drawn as zero intensity, which is indistinguishable
   from a genuine absence of spectral weight, so a warning is printed when a

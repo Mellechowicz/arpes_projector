@@ -411,14 +411,40 @@ _prj = KSpaceProjector(kp, eig, rec)
 _n = np.array([0., 0, 1])
 _ur, _vr = _prj.suggest_plane_bounds(_n, np.zeros(3))
 _nh, _pc, _uh, _vh = _prj.define_plane_basis(_n, np.zeros(3))
-_pu, _pv = _prj.kpoints_cart @ _uh, _prj.kpoints_cart @ _vh
-# The bounds must contain every k-point's projection: they are an upper bound on
-# the slice's own extent, so they can never crop real data.
-check("derived bounds contain the whole projected cloud",
-      _ur[0] <= _pu.min() and _pu.max() <= _ur[1]
-      and _vr[0] <= _pv.min() and _pv.max() <= _vr[1])
+_sec = _prj._hull_plane_section(_nh, _pc)
+check("the plane's hull cross-section is found", _sec is not None and len(_sec) >= 3,
+      f"{0 if _sec is None else len(_sec)} crossings")
+_su, _sv = (_sec - _pc) @ _uh, (_sec - _pc) @ _vh
+check("derived bounds contain the whole hull cross-section",
+      _ur[0] <= _su.min() and _su.max() <= _ur[1]
+      and _vr[0] <= _sv.min() and _sv.max() <= _vr[1])
 check("derived bounds are padded, not exactly touching",
-      _ur[0] < _pu.min() and _pu.max() < _ur[1])
+      _ur[0] < _su.min() and _su.max() < _ur[1])
+# The real guarantee is that nothing carrying data falls outside. Interpolate on
+# a window twice as wide and confirm every finite pixel sits inside the bounds.
+_wide_u = (_ur[0] * 2, _ur[1] * 2)
+_wide_v = (_vr[0] * 2, _vr[1] * 2)
+_res = 61
+_wide = _prj.interpolate_plane(_n, np.zeros(3), _wide_u, _wide_v, _res, 1)[2][0, 0]
+_gu = np.linspace(_wide_u[0], _wide_u[1], _res)
+_gv = np.linspace(_wide_v[0], _wide_v[1], _res)
+_fv, _fu = np.nonzero(np.isfinite(_wide))
+check("no pixel carrying data falls outside the derived bounds",
+      _gu[_fu].min() >= _ur[0] and _gu[_fu].max() <= _ur[1]
+      and _gv[_fv].min() >= _vr[0] and _gv[_fv].max() <= _vr[1],
+      f"data spans u [{_gu[_fu].min():.3f},{_gu[_fu].max():.3f}] "
+      f"within [{_ur[0]:.3f},{_ur[1]:.3f}]")
+# An oblique plane cuts a much smaller polygon than the cloud's full shadow;
+# that gap is the whole reason for sectioning the hull rather than projecting.
+_no = np.array([1., 1, 1])
+_ou, _ov = _prj.suggest_plane_bounds(_no, np.zeros(3))
+_onh, _opc, _ouh, _ovh = _prj.define_plane_basis(_no, np.zeros(3))
+_proj_u = _prj.kpoints_cart @ _ouh
+_area = (_ou[1] - _ou[0]) * (_ov[1] - _ov[0])
+_shadow = (_proj_u.max() - _proj_u.min()) * (
+        (_prj.kpoints_cart @ _ovh).max() - (_prj.kpoints_cart @ _ovh).min())
+check("an oblique plane gets a tighter window than the cloud's shadow",
+      _area < 0.95 * _shadow, f"{_area / _shadow:.2f} of the projected area")
 # The whole point: a window tracking the cloud beats a fixed +/-2.
 _cov = lambda ur, vr: 1.0 - float(np.isnan(
         _prj.interpolate_plane(_n, np.zeros(3), ur, vr, 30, 1)[2][0, 0]).mean())

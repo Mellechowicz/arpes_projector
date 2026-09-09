@@ -108,6 +108,45 @@ class KSpaceProjector:
 
         return n_hat, p_cart, u_hat, v_hat
 
+    def suggest_plane_bounds(self, normal_frac: np.ndarray, point_frac: np.ndarray,
+                             u_dir_cart: np.ndarray = None, margin: float = 0.05
+                             ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """
+        Proposes in-plane bounds covering the k-point cloud's footprint.
+
+        A fixed +/-2 A^-1 window is unrelated to any particular calculation. For
+        a cloud reaching only +/-0.33 A^-1 along v it leaves ~95% of the figure
+        outside the convex hull, drawn as zero intensity and indistinguishable
+        from a genuine absence of spectral weight.
+
+        Projecting every k-point onto the plane axes bounds the footprint from
+        above: the plane's own intersection with the cloud can only be smaller,
+        so these bounds never crop real data.
+
+        Args:
+            normal_frac (np.ndarray): Fractional normal vector defining the plane.
+            point_frac (np.ndarray): Fractional point the plane passes through.
+            u_dir_cart (np.ndarray, optional): Cartesian vector guiding the u-axis.
+            margin (float): Fraction of each span added as padding on both sides.
+
+        Returns:
+            Tuple[Tuple[float, float], Tuple[float, float]]: (u_range, v_range).
+        """
+        _, p_cart, u_hat, v_hat = self.define_plane_basis(normal_frac, point_frac, u_dir_cart)
+        rel = self.kpoints_cart - p_cart
+        ranges = []
+        for axis in (u_hat, v_hat):
+            proj = rel @ axis
+            lo, hi = float(proj.min()), float(proj.max())
+            span = hi - lo
+            if not np.isfinite(span) or span <= 0.0:
+                # A cloud with no extent along this axis - a single k-point, or a
+                # plane containing a degenerate line - gives nothing to scale to.
+                lo, hi, span = -1.0, 1.0, 2.0
+            pad = margin * span
+            ranges.append((lo - pad, hi + pad))
+        return ranges[0], ranges[1]
+
     def interpolate_plane(self, normal_frac: np.ndarray, point_frac: np.ndarray,
                           u_range: Tuple[float, float], v_range: Tuple[float, float],
                           grid_resolution: int = 150, interpolate_factor: int = 1,

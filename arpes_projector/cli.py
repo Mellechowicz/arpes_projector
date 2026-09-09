@@ -57,8 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     geom_group = parser.add_argument_group("Reciprocal Geometry Options")
     geom_group.add_argument("--normal", nargs=3, type=float, default=[0.0, 0.0, 1.0], help="Fractional normal vector of the projection plane.")
     geom_group.add_argument("--origin", nargs=3, type=float, default=[0.0, 0.0, 0.0], help="Fractional point the projection plane passes through.")
-    geom_group.add_argument("--ubounds", nargs=2, type=float, default=[-2.0, 2.0], help="Coordinate limits of the projection plane u-axis (A^-1).")
-    geom_group.add_argument("--vbounds", nargs=2, type=float, default=[-2.0, 2.0], help="Coordinate limits of the projection plane v-axis (A^-1).")
+    geom_group.add_argument("--ubounds", nargs=2, type=float, default=None,
+                            help="Coordinate limits of the projection plane u-axis (A^-1). Defaults to the k-point cloud's own footprint on the plane.")
+    geom_group.add_argument("--vbounds", nargs=2, type=float, default=None,
+                            help="Coordinate limits of the projection plane v-axis (A^-1). Defaults to the k-point cloud's own footprint on the plane.")
     geom_group.add_argument("--resolution", type=_positive_int, default=250, help="Grid resolution for the 2D projection plane.")
     geom_group.add_argument("--smooth", type=_positive_int, default=2, help="Sumo-style interpolation smoothing multiplier.")
 

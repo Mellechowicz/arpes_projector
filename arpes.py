@@ -109,7 +109,10 @@ def load_matrix_element_weights(args, input_resolved, eigenvalues):
 
 def _slug(text: str, limit: int = 28) -> str:
     """Reduces an arbitrary CLI spec to a short, filename-safe fragment."""
-    clean = re.sub(r"[^0-9A-Za-z.+-]+", "-", text).strip("-")
+    # Minus signs carry meaning here (negative bounds, negative weights) but "-"
+    # is also the separator, so stripping would silently drop the sign: map it to
+    # "m" before any separator work.
+    clean = re.sub(r"[^0-9A-Za-z.+-]+", "-", text.replace("-", "m")).strip("-")
     if len(clean) <= limit:
         return clean
     # Long specs would make unwieldy names; keep a readable prefix and make the
@@ -138,6 +141,12 @@ def figure_tag(args, energy_part: str, weighted: bool = None) -> str:
         str: The tag, without a leading or trailing separator.
     """
     tag = f"{energy_part}_g{args.broadening:g}_{args.cscale}"
+    if args.ubounds is not None or args.vbounds is not None:
+        # Derived bounds are a deterministic function of the input, so they
+        # cannot collide; explicitly chosen windows can.
+        tag += "_w" + _slug("x".join(
+                "auto" if b is None else f"{b[0]:g}to{b[1]:g}"
+                for b in (args.ubounds, args.vbounds)))
     if args.temperature is not None:
         tag += f"_T{args.temperature:g}K"
     if weighted is False:
@@ -150,14 +159,44 @@ def figure_tag(args, energy_part: str, weighted: bool = None) -> str:
     return tag
 
 
+def resolve_bounds(projector, args, normal_frac, u_dir_cart=None):
+    """
+    Returns the (u, v) window, deriving whichever side the user left unset.
+
+    An explicit --ubounds/--vbounds always wins; the derived window is only a
+    default, and it is printed rather than applied silently.
+
+    Args:
+        projector (KSpaceProjector): Provides the k-point cloud and plane basis.
+        args: Parsed CLI namespace.
+        normal_frac (np.ndarray): Fractional normal of the projection plane.
+        u_dir_cart (np.ndarray, optional): Cartesian vector guiding the u-axis.
+
+    Returns:
+        Tuple[Tuple[float, float], Tuple[float, float]]: (u_range, v_range).
+    """
+    if args.ubounds is not None and args.vbounds is not None:
+        return tuple(args.ubounds), tuple(args.vbounds)
+    auto_u, auto_v = projector.suggest_plane_bounds(
+            normal_frac, np.array(args.origin), u_dir_cart)
+    u_range = tuple(args.ubounds) if args.ubounds is not None else auto_u
+    v_range = tuple(args.vbounds) if args.vbounds is not None else auto_v
+    print(f"[Geometry] Bounds from the k-point cloud: "
+          f"u [{u_range[0]:.3f}, {u_range[1]:.3f}], "
+          f"v [{v_range[0]:.3f}, {v_range[1]:.3f}] A^-1 "
+          f"(override with --ubounds / --vbounds)")
+    return u_range, v_range
+
+
 def execute_projection(projector, efermi, args, normal_frac, plane_label):
     """Helper method to interpolate and plot projection slices."""
     print(f"\n[Geometry] Interpolating onto plane (Normal: {normal_frac})...")
+    u_range, v_range = resolve_bounds(projector, args, normal_frac)
     u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
             normal_frac=normal_frac,
             point_frac=np.array(args.origin),
-            u_range=tuple(args.ubounds),
-            v_range=tuple(args.vbounds),
+            u_range=u_range,
+            v_range=v_range,
             grid_resolution=args.resolution,
             interpolate_factor=args.smooth
             )
@@ -322,9 +361,14 @@ def main():
 
             print(f" -> Path: -{pt_info['raw']} -> Gamma -> +{pt_info['raw']}")
 
+            # u spans the symmetry path, so only v needs deriving; the old fixed
+            # +/-3 A^-1 was several times the cloud's reach and wasted most rows.
+            _sbz_v_range = (tuple(args.vbounds) if args.vbounds is not None
+                            else projector.suggest_plane_bounds(
+                                    normal_frac, np.zeros(3), u_dir_cart)[1])
             u_grid, v_grid, interp_spectra, interp_weights = projector.interpolate_plane(
                 normal_frac=normal_frac, point_frac=np.array([0.0, 0.0, 0.0]),
-                u_range=(-dist, dist), v_range=(-3.0, 3.0),
+                u_range=(-dist, dist), v_range=_sbz_v_range,
                 grid_resolution=args.resolution, interpolate_factor=args.smooth, u_dir_cart=u_dir_cart
             )
 

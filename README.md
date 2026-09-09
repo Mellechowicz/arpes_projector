@@ -57,6 +57,7 @@ Set the execution mode using the `--mode` flag.
 | `--elimits` | Binding energy limits for dispersion slices (2 values). | `-3.0 1.0` |
 | `--miller_surf` | Miller index for the surface (3 values). | `0 0 1` |
 | `--slab_min` / `--vac_min` | Minimum slab and vacuum thickness (A) for the real-space slab. | `15.0` / `20.0` |
+| `--ubounds` / `--vbounds` | Plot window along u / v (A^-1). | k-point cloud footprint |
 | `--temperature` | Sample temperature (K). Applies the Fermi-Dirac cutoff `f(E-Ef,T)` to the intensity. | None (no cutoff) |
 | `--matrix_elements` | Weight intensity by orbital/site projections instead of treating every band as equally bright. Needs `LORBIT=11` or `12`. | `False` |
 | `--orbital_weights` | Orbital or shell weights, e.g. `"s:1,p:0.5,dz2:2"` or `"d:1"`. Unlisted orbitals get 0 (override with `default:x`). Implies `--matrix_elements`. | None |
@@ -147,11 +148,20 @@ existed** - there is a regression check for exactly that.
   zero and blanks the spectrum, negative gives negative intensity),
   `--resolution` / `--smooth` / `--n_energy` must be at least 1, and a
   zero-length `--normal` does not define a plane.
+* **The plot window defaults to the k-point cloud's own footprint** rather than
+  a fixed +/-2 A^-1. That fixed window is unrelated to any given calculation:
+  for a cloud reaching +/-0.33 A^-1 along v it left 94-95% of every figure
+  outside the convex hull, drawn as zero intensity. Deriving the window from the
+  cloud takes the local 600 MB example from 94-95% empty on all 12 planes to
+  53-74% on 7 of them, and the `--mock` demo from 73% empty to none. The bounds
+  are printed, never applied silently, and an explicit `--ubounds` / `--vbounds`
+  always wins - each axis independently, so you can pin one and derive the
+  other. Because the window projects the whole cloud, it is an upper bound on
+  the slice's own extent and can never crop real data.
 * **Coverage of the k-point cloud is reported.** Points outside its convex hull
   interpolate to NaN and are drawn as zero intensity, which is indistinguishable
   from a genuine absence of spectral weight, so a warning is printed when a
-  large fraction of the window carries no data. With the default
-  `--ubounds -2 2` the built-in `--mock` demo reports 73%.
+  large fraction of the window carries no data.
 
 ### Examples
 

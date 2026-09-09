@@ -406,5 +406,64 @@ check("negative Miller indices stay unambiguous",
       != _sbz(_bp2().parse_args(["--miller_surf", "1", "-1", "1"])))
 
 
+# --- cloud-derived plane bounds ----------------------------------------------
+_prj = KSpaceProjector(kp, eig, rec)
+_n = np.array([0., 0, 1])
+_ur, _vr = _prj.suggest_plane_bounds(_n, np.zeros(3))
+_nh, _pc, _uh, _vh = _prj.define_plane_basis(_n, np.zeros(3))
+_pu, _pv = _prj.kpoints_cart @ _uh, _prj.kpoints_cart @ _vh
+# The bounds must contain every k-point's projection: they are an upper bound on
+# the slice's own extent, so they can never crop real data.
+check("derived bounds contain the whole projected cloud",
+      _ur[0] <= _pu.min() and _pu.max() <= _ur[1]
+      and _vr[0] <= _pv.min() and _pv.max() <= _vr[1])
+check("derived bounds are padded, not exactly touching",
+      _ur[0] < _pu.min() and _pu.max() < _ur[1])
+# The whole point: a window tracking the cloud beats a fixed +/-2.
+_cov = lambda ur, vr: 1.0 - float(np.isnan(
+        _prj.interpolate_plane(_n, np.zeros(3), ur, vr, 30, 1)[2][0, 0]).mean())
+_c_auto, _c_fixed = _cov(_ur, _vr), _cov((-2., 2.), (-2., 2.))
+check("derived bounds cover more of the cloud than the fixed +/-2 window",
+      _c_auto > 3 * _c_fixed, f"{_c_auto:.0%} vs {_c_fixed:.0%} of the window carries data")
+# A cloud with no extent must not produce a zero-width or NaN window.
+_deg = KSpaceProjector(np.zeros((1, 3)), np.zeros((1, 1, 1)), rec)
+_du, _dv = _deg.suggest_plane_bounds(_n, np.zeros(3))
+check("a degenerate cloud falls back to a finite window",
+      all(np.isfinite(b) for b in _du + _dv) and _du[1] > _du[0] and _dv[1] > _dv[0],
+      f"u {_du}, v {_dv}")
+
+# Explicit bounds must win, and each axis is resolved independently.
+_ns_auto = _bp2().parse_args([])
+_ns_u = _bp2().parse_args(["--ubounds", "-1", "1"])
+check("--ubounds and --vbounds default to None so 'unset' is distinguishable",
+      _ns_auto.ubounds is None and _ns_auto.vbounds is None)
+_ru, _rv = _am.resolve_bounds(_prj, _ns_u, _n)
+check("an explicit --ubounds wins while v is still derived",
+      _ru == (-1.0, 1.0) and _rv == _vr, f"u {_ru}, v {_rv}")
+_ru2, _rv2 = _am.resolve_bounds(_prj, _bp2().parse_args(
+        ["--ubounds", "-1", "1", "--vbounds", "-2", "2"]), _n)
+check("both explicit bounds are passed through untouched",
+      _ru2 == (-1.0, 1.0) and _rv2 == (-2.0, 2.0))
+# Derived bounds are a deterministic function of the input, so they need no tag;
+# explicitly chosen windows can differ between runs and must be named.
+check("derived bounds add nothing to the filename tag",
+      _am.figure_tag(_ns_auto, "E+0.00") == _plain)
+# A leading minus is meaningful and must survive: "-1 2" and "1 2" are different
+# windows, and an earlier version stripped the sign and named them alike.
+check("a negative bound keeps its sign in the tag",
+      _am.figure_tag(_bp2().parse_args(["--ubounds", "-1", "2"]), "E+0.00")
+      != _am.figure_tag(_bp2().parse_args(["--ubounds", "1", "2"]), "E+0.00"),
+      _am.figure_tag(_bp2().parse_args(["--ubounds", "-1", "2"]), "E+0.00"))
+# argparse reads a bare "-1,1" as an option, so a negative spec needs the "="
+# form; the slug must still keep the sign either way.
+check("a negative ion weight keeps its sign in the tag",
+      _am.figure_tag(_bp2().parse_args(["--ion_weights=-1,1"]), "E+0.00")
+      != _am.figure_tag(_bp2().parse_args(["--ion_weights=1,1"]), "E+0.00"))
+check("explicit bounds appear in the filename tag",
+      _am.figure_tag(_ns_u, "E+0.00") != _plain
+      and _am.figure_tag(_ns_u, "E+0.00") != _am.figure_tag(
+              _bp2().parse_args(["--ubounds", "-3", "3"]), "E+0.00"))
+
+
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))
 sys.exit(1 if FAIL else 0)

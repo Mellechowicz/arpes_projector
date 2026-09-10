@@ -491,5 +491,39 @@ check("explicit bounds appear in the filename tag",
               _bp2().parse_args(["--ubounds", "-3", "3"]), "E+0.00"))
 
 
+# --- h5 and xml describe the same calculation --------------------------------
+_H5, _XML120 = os.path.join(REPO, "120", "vaspout.h5"), os.path.join(REPO, "120", "vasprun.xml")
+if os.path.exists(_H5) and os.path.exists(_XML120):
+    from arpes_projector.parser import VaspDataParser as _VDP
+    _h5d = _VDP(_H5)._parse_h5()
+    _xmd = _VDP(_XML120)._parse_xml_stream()
+    _e1, _e2 = np.asarray(_h5d["eigenvalues"]), np.asarray(_xmd["eigenvalues"])
+    _k1, _k2 = np.asarray(_h5d["kpoints"]), np.asarray(_xmd["kpoints"])
+    check("h5 and xml agree on the eigenvalue shape", _e1.shape == _e2.shape,
+          f"{_e1.shape}")
+    # The XML prints energies to ~4 decimals while the h5 stores full doubles, so
+    # these can agree to print precision but never bit-for-bit.
+    check("h5 and xml eigenvalues agree to the XML's print precision",
+          np.abs(_e1 - _e2).max() < 1e-4, f"max|diff| {np.abs(_e1 - _e2).max():.1e}")
+    check("h5 and xml k-points agree", np.abs(_k1 - _k2).max() < 1e-6,
+          f"max|diff| {np.abs(_k1 - _k2).max():.1e}")
+    check("h5 and xml agree on the Fermi energy",
+          abs(_h5d["efermi"] - _xmd["efermi"]) < 1e-6)
+    _r1, _r2 = np.asarray(_h5d["rec_lattice"]), np.asarray(_xmd["rec_lattice"])
+    check("h5 and xml agree on the reciprocal lattice",
+          np.abs(_r1 - _r2).max() < 1e-6, f"max|diff| {np.abs(_r1 - _r2).max():.1e}")
+    # The h5 path once risked falling back to 2*pi*I, which would report a cubic
+    # 90-degree cell for this hexagonal one. Pin the real geometry down.
+    def _angle(m):
+        c = m[0] @ m[1] / (np.linalg.norm(m[0]) * np.linalg.norm(m[1]))
+        return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+    check("the h5 reciprocal lattice is the real hexagonal one, not 2*pi*I",
+          abs(_angle(_r1) - 90.0) > 1.0
+          and not np.allclose(_r1, 2 * np.pi * np.eye(3)),
+          f"b1^b2 = {_angle(_r1):.2f} deg")
+else:
+    print("[SKIP] h5-vs-xml cross-check (120/ outputs absent)")
+
+
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))
 sys.exit(1 if FAIL else 0)

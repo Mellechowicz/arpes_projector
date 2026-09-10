@@ -117,6 +117,16 @@ floats it carries. On this file that subtree was 2.7M nodes and 1.2 GB - the
 entire peak. Draining it k-point by k-point cut peak RSS from 1.29 GB to
 0.22 GB with byte-identical output.
 
+`vaspout.h5` costs almost nothing by comparison, because HDF5 reads only the
+datasets asked for: the 8.3 GB `vaspout.h5` written by the same calculation as
+the 9.33 GiB `vasprun.xml` parses in **0.04 s at 0.22 GB**, some 250x faster
+than streaming the XML. Prefer it when both are present. The two agree - same
+eigenvalue shape and Fermi energy, k-points to 5e-9 and the reciprocal lattice
+to 3e-8, with eigenvalues matching to 5e-5, which is the precision the XML
+prints. There is a regression check for that agreement, and for the reciprocal
+lattice being the real hexagonal basis (30.4 deg between b1 and b2) rather than
+a `2*pi*I` stand-in.
+
 On a 600 MB file the streaming parser reproduces pymatgen's k-points,
 eigenvalues and Fermi energy bit-for-bit (the reciprocal lattice to the ~8
 digits the XML prints) and is about 9x faster; there is a regression check for

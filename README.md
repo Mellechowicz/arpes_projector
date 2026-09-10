@@ -49,7 +49,7 @@ Set the execution mode using the `--mode` flag.
 | Argument | Description | Default |
 | :--- | :--- | :--- |
 | `--mode` | Set execution mode (`single`, `multi`, `surface_bz`, `surface_bands`). | `single` |
-| `--input` | Path to VASP output file (`vaspout.h5` or `vasprun.xml`). | None |
+| `--input` | Path to a VASP output file, or a directory holding one. | None |
 | `--mock` | Force generation of synthetic tight-binding dataset. | `False` |
 | `--outdir` | Directory path for generated plots. | `arpes_outputs` |
 | `--normal` | Fractional normal vector of the projection plane (3 values). | `0.0 0.0 1.0` |
@@ -161,6 +161,18 @@ filenames (`..._T300K.png`), so they do not overwrite runs that do not.
 
 **The flag is opt-in and output without it is bit-identical to before it
 existed** - there is a regression check for exactly that.
+
+### Choosing the input
+
+`--input` takes a file or a directory. Given a directory it looks for
+`vaspout.h5` first, then `vasprun.xml`, and says which it took and why. Naming a
+file explicitly always wins over that preference, so `--input run/vasprun.xml`
+reads the XML even with an `.h5` beside it. With no `--input` at all the working
+directory is searched the same way.
+
+A `--input` that does not exist is an error, not a fallback. It previously
+dropped through to the synthetic dataset, which meant a mistyped path produced a
+complete, plausible-looking figure containing none of your data.
 
 ### Behaviour worth knowing
 

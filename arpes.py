@@ -188,6 +188,61 @@ def resolve_bounds(projector, args, normal_frac, u_dir_cart=None):
     return u_range, v_range
 
 
+# vaspout.h5 carries the same content as vasprun.xml but is read by dataset
+# rather than by parsing: 0.04 s against 10.1 s for the 120/ pair, ~250x.
+PREFERRED_INPUTS = ("vaspout.h5", "vasprun.xml")
+
+
+def resolve_input(args):
+    """
+    Chooses which VASP output to read, and says why.
+
+    An explicit --input naming a file is always honoured. Naming a directory
+    searches it, preferring vaspout.h5. Naming nothing searches the working
+    directory the same way.
+
+    Args:
+        args: Parsed CLI namespace.
+
+    Returns:
+        Optional[str]: Path to the chosen file, or None when nothing was found.
+
+    Raises:
+        FileNotFoundError: If --input was given explicitly but resolves to
+            nothing. Falling back to synthetic data there would hand back a
+            convincing figure built from a typo.
+    """
+    if args.input and os.path.isfile(args.input):
+        print(f"[I/O] Reading {args.input} (named explicitly)")
+        return args.input
+
+    if args.input and os.path.isdir(args.input):
+        directory, source = args.input, f"in {args.input}"
+    elif args.input:
+        raise FileNotFoundError(
+                f"--input {args.input!r} is neither a file nor a directory. "
+                "Refusing to fall back to the synthetic dataset, which would "
+                "produce a plausible figure from a path that does not exist.")
+    else:
+        directory, source = ".", "in the working directory"
+
+    found = [n for n in PREFERRED_INPUTS if os.path.isfile(os.path.join(directory, n))]
+    if not found:
+        if args.input:
+            raise FileNotFoundError(
+                    f"no {' or '.join(PREFERRED_INPUTS)} in {args.input!r}.")
+        return None
+
+    chosen = os.path.join(directory, found[0])
+    if len(found) > 1:
+        print(f"[I/O] Reading {chosen}: both {' and '.join(found)} are {source}, "
+              f"and the HDF5 file is read by dataset rather than parsed "
+              f"(~250x faster on a multi-GB run)")
+    else:
+        print(f"[I/O] Reading {chosen} (the only VASP output {source})")
+    return chosen
+
+
 def execute_projection(projector, efermi, args, normal_frac, plane_label):
     """Helper method to interpolate and plot projection slices."""
     print(f"\n[Geometry] Interpolating onto plane (Normal: {normal_frac})...")
@@ -256,17 +311,10 @@ def main():
         print("[I/O] Initializing synthetic simple-cubic tight-binding dataset...")
         data = generate_mock_electronic_structure()
     else:
-        # Fallback resolution mechanism
-        candidates = [args.input] if args.input else ["vaspout.h5", "vasprun.xml"]
-        for candidate in candidates:
-            if candidate and os.path.exists(candidate):
-                print(f"[I/O] Resolving calculation database: {candidate}")
-                parser_inst = VaspDataParser(candidate)
-                data = parser_inst.parse()
-                input_resolved = candidate
-                break
-
-        if data is None:
+        input_resolved = resolve_input(args)
+        if input_resolved is not None:
+            data = VaspDataParser(input_resolved).parse()
+        else:
             print("[Warning] No VASP files found. Falling back to synthetic dataset.")
             data = generate_mock_electronic_structure()
 
@@ -395,5 +443,11 @@ def main():
     print("=" * 80)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except FileNotFoundError as exc:
+        # A missing input is a user mistake, not a crash; a traceback buries the
+        # one line that says what to fix.
+        print(f"[Error] {exc}", file=sys.stderr)
+        sys.exit(2)
 

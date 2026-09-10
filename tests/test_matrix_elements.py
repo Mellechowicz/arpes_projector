@@ -525,5 +525,37 @@ else:
     print("[SKIP] h5-vs-xml cross-check (120/ outputs absent)")
 
 
+# --- input resolution ---------------------------------------------------------
+import tempfile as _tf
+_ns = lambda v: _bp2().parse_args([] if v is None else ["--input", v])
+
+with _tf.TemporaryDirectory() as _d:
+    _h5p, _xmlp = os.path.join(_d, "vaspout.h5"), os.path.join(_d, "vasprun.xml")
+    open(_xmlp, "w").close()
+    # Only the xml present: it must be picked despite the h5 ranking higher.
+    check("a directory with only vasprun.xml resolves to it",
+          _am.resolve_input(_ns(_d)) == _xmlp)
+    open(_h5p, "w").close()
+    # Both present: the h5 wins, because it is read by dataset not parsed.
+    check("a directory with both prefers vaspout.h5",
+          _am.resolve_input(_ns(_d)) == _h5p)
+    # An explicitly named file always wins over the preference order.
+    check("an explicit vasprun.xml is honoured over the h5 preference",
+          _am.resolve_input(_ns(_xmlp)) == _xmlp)
+    # A path that does not exist must not quietly become synthetic data.
+    try:
+        _am.resolve_input(_ns(os.path.join(_d, "nope.h5"))); _ok = False
+    except FileNotFoundError:
+        _ok = True
+    check("a nonexistent --input raises instead of falling back to mock data", _ok)
+
+with _tf.TemporaryDirectory() as _d2:
+    try:
+        _am.resolve_input(_ns(_d2)); _ok = False
+    except FileNotFoundError:
+        _ok = True
+    check("an --input directory holding no VASP output raises", _ok)
+
+
 print("\n" + ("ALL CHECKS PASSED" if not FAIL else f"{len(FAIL)} FAILED: {FAIL}"))
 sys.exit(1 if FAIL else 0)
